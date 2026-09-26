@@ -184,14 +184,20 @@ def _timestamp(value):
         return None
 
 
-def _claim_suppression(key):
+def _claim_suppression(key, evaluation_id=None):
     if not key:
         return True
+    suppression_key = f"{evaluation_id}:{key}" if evaluation_id else key
     if _shared_store_enabled():
-        return _kv_command("SET", f"vera:suppression:{quote(key, safe='')}", "1", "NX") == "OK"
-    if key in _sent_suppression_keys:
+        return _kv_command(
+            "SET",
+            f"vera:suppression:{quote(suppression_key, safe='')}",
+            "1",
+            "NX",
+        ) == "OK"
+    if suppression_key in _sent_suppression_keys:
         return False
-    _sent_suppression_keys.add(key)
+    _sent_suppression_keys.add(suppression_key)
     return True
 
 
@@ -229,11 +235,10 @@ def tick_actions(data):
         if trigger.get("scope") == "customer" and customer is None:
             continue
         suppression_key = trigger.get("suppression_key", "")
-        if not _claim_suppression(suppression_key):
-            continue
-
         message = compose(category, merchant, trigger, customer)
         if not message or not message.get("body"):
+            continue
+        if not _claim_suppression(suppression_key, data.get("evaluation_id")):
             continue
         actions.append({
             "conversation_id": f"conv_{uuid.uuid4().hex[:16]}",

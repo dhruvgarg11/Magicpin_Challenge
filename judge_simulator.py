@@ -50,6 +50,7 @@ import time
 import re
 import socket
 import ssl
+import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
@@ -443,23 +444,28 @@ class BotClient:
     def push_context(self, scope, cid, version, payload):
         return self._request("POST", "/v1/context", 10, {
             "scope": scope, "context_id": cid, "version": version,
-            "payload": payload, "delivered_at": datetime.utcnow().isoformat() + "Z"
+            "payload": payload,
+            "delivered_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         })
 
-    def tick(self, triggers, now=None):
-        current_time = now or datetime.utcnow()
+    def tick(self, triggers, now=None, evaluation_id=None):
+        current_time = now or datetime.now(timezone.utc)
         if current_time.tzinfo is None:
             current_time = current_time.replace(tzinfo=timezone.utc)
-        return self._request("POST", "/v1/tick", 15, {
+        payload = {
             "now": current_time.isoformat().replace("+00:00", "Z"),
             "available_triggers": triggers
-        })
+        }
+        if evaluation_id:
+            payload["evaluation_id"] = evaluation_id
+        return self._request("POST", "/v1/tick", 15, payload)
 
     def reply(self, conv_id, merchant_id, message, turn):
         return self._request("POST", "/v1/reply", 15, {
             "conversation_id": conv_id, "merchant_id": merchant_id, "customer_id": None,
             "from_role": "merchant", "message": message,
-            "received_at": datetime.utcnow().isoformat() + "Z", "turn_number": turn
+            "received_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "turn_number": turn
         })
 
 # =============================================================================
@@ -616,6 +622,7 @@ class JudgeSimulator:
         self.dataset = DatasetLoader(DATASET_DIR)
         self.scorer: Optional[LLMScorer] = None
         self.all_scores: List[ScoreResult] = []
+        self.evaluation_id = uuid.uuid4().hex
 
     def run(self, scenario: str) -> bool:
         print_header(f"LLM JUDGE — {scenario.upper()}")
@@ -872,7 +879,11 @@ class JudgeSimulator:
 
         for i in range(0, len(tids), 5):
             batch = tids[i:i+5]
-            data, err, lat = self.client.tick(batch, now=SIMULATED_TEST_NOW)
+            data, err, lat = self.client.tick(
+                batch,
+                now=SIMULATED_TEST_NOW,
+                evaluation_id=self.evaluation_id,
+            )
 
             if err:
                 print_warn(f"Tick failed: {err}")
