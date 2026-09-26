@@ -22,13 +22,13 @@ Author: magicpin AI Challenge Team
 # =============================================================================
 
 # Your bot's URL (where your bot is running)
-BOT_URL = "http://localhost:8080"
+BOT_URL = os.environ.get("BOT_URL", "http://localhost:8080")
 
 # Choose your LLM provider: "openai", "anthropic", "gemini", "deepseek", "groq", "ollama", "openrouter"
 LLM_PROVIDER = "openai"
 
-# Your API key (paste your key here)
-LLM_API_KEY = os.environ.get("OPENAI_API_KEY", "")  # <-- PUT YOUR API KEY HERE
+# Your API key (set OPENAI_API_KEY in the environment)
+LLM_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 # Model to use (leave empty for default, or specify like "gpt-4o", "claude-3-5-sonnet-20241022", etc.)
 LLM_MODEL = ""  # <-- Optional: specify model or leave empty for default
@@ -37,7 +37,7 @@ LLM_MODEL = ""  # <-- Optional: specify model or leave empty for default
 OLLAMA_URL = "http://localhost:11434"
 
 # Which test to run by default
-TEST_SCENARIO = "all"
+TEST_SCENARIO = "full_evaluation"
 
 # =============================================================================
 # ██████  END OF CONFIGURATION - DON'T EDIT BELOW THIS LINE ██████
@@ -49,7 +49,8 @@ import json
 import time
 import re
 import socket
-from datetime import datetime
+import ssl
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
@@ -59,6 +60,29 @@ from abc import ABC, abstractmethod
 # Constants
 TIMEOUT_LLM = 45
 DATASET_DIR = Path(__file__).parent / "dataset"
+SIMULATED_TEST_NOW = datetime.fromisoformat("2026-04-26T10:30:00+00:00")
+
+
+def configure_system_ca_bundle():
+    defaults = ssl.get_default_verify_paths()
+    if defaults.cafile and Path(defaults.cafile).is_file():
+        return
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+
+    candidates = (
+        Path("/etc/ssl/cert.pem"),
+        Path("/etc/ssl/certs/ca-certificates.crt"),
+        Path("/opt/homebrew/etc/openssl@3/cert.pem"),
+        Path("/usr/local/etc/openssl@3/cert.pem"),
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            os.environ["SSL_CERT_FILE"] = str(candidate)
+            return
+
+
+configure_system_ca_bundle()
 
 # =============================================================================
 # TERMINAL OUTPUT
@@ -124,8 +148,8 @@ class ScoreResult:
     category_fit_reason: str = ""
     merchant_fit: int = 0
     merchant_fit_reason: str = ""
-    decision_quality: int = 0
-    decision_quality_reason: str = ""
+    trigger_relevance: int = 0
+    trigger_relevance_reason: str = ""
     engagement_compulsion: int = 0
     engagement_reason: str = ""
     penalties: int = 0
@@ -135,7 +159,7 @@ class ScoreResult:
     @property
     def total(self) -> int:
         return max(0, self.specificity + self.category_fit + self.merchant_fit +
-                   self.decision_quality + self.engagement_compulsion - self.penalties)
+                   self.trigger_relevance + self.engagement_compulsion - self.penalties)
 
 # =============================================================================
 # LLM PROVIDERS
@@ -422,9 +446,13 @@ class BotClient:
             "payload": payload, "delivered_at": datetime.utcnow().isoformat() + "Z"
         })
 
-    def tick(self, triggers):
+    def tick(self, triggers, now=None):
+        current_time = now or datetime.utcnow()
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
         return self._request("POST", "/v1/tick", 15, {
-            "now": datetime.utcnow().isoformat() + "Z", "available_triggers": triggers
+            "now": current_time.isoformat().replace("+00:00", "Z"),
+            "available_triggers": triggers
         })
 
     def reply(self, conv_id, merchant_id, message, turn):
@@ -485,8 +513,8 @@ RESPOND ONLY WITH THIS EXACT JSON FORMAT:
   "category_fit_reason": "<why this score>",
   "merchant_fit": <0-10>,
   "merchant_fit_reason": "<why this score>",
-  "decision_quality": <0-10>,
-  "decision_quality_reason": "<why this score>",
+    "trigger_relevance": <0-10>,
+    "trigger_relevance_reason": "<why this score>",
   "engagement_compulsion": <0-10>,
   "engagement_reason": "<why this score>",
   "hint": "<one sentence guidance for improvement, cryptic not direct>"
@@ -530,52 +558,51 @@ Send As: {action.get('send_as', 'vera')}
 
 Score each dimension 0-10 with clear reasoning. Be STRICT."""
 
-        try:
-            print_llm("Analyzing message...")
-            response = self.llm.complete(prompt, self.SYSTEM)
-            return self._parse_response(response, action)
-        except Exception as e:
-            print_warn(f"LLM error: {e}")
-            return self._fallback_score(action)
+        print_llm("Analyzing message...")
+        response = self.llm.complete(prompt, self.SYSTEM)
+        return self._parse_response(response, action)
 
     def _parse_response(self, response: str, action: Dict) -> ScoreResult:
         """Parse LLM JSON response."""
         match = re.search(r'\{[\s\S]*\}', response)
         if not match:
-            return self._fallback_score(action)
+            raise ValueError("LLM response did not contain a JSON score object.")
 
-        try:
-            data = json.loads(match.group())
-            result = ScoreResult(
-                specificity=min(10, max(0, int(data.get("specificity", 5)))),
-                specificity_reason=data.get("specificity_reason", ""),
-                category_fit=min(10, max(0, int(data.get("category_fit", 5)))),
-                category_fit_reason=data.get("category_fit_reason", ""),
-                merchant_fit=min(10, max(0, int(data.get("merchant_fit", 5)))),
-                merchant_fit_reason=data.get("merchant_fit_reason", ""),
-                decision_quality=min(10, max(0, int(data.get("decision_quality", data.get("trigger_relevance", 5))))),
-                decision_quality_reason=data.get("decision_quality_reason", data.get("trigger_relevance_reason", "")),
-                engagement_compulsion=min(10, max(0, int(data.get("engagement_compulsion", 5)))),
-                engagement_reason=data.get("engagement_reason", ""),
-                hint=data.get("hint", "")
-            )
-            return result
-        except Exception as e:
-            print_warn(f"Parse error: {e}")
-            return self._fallback_score(action)
+        data = json.loads(match.group())
+        score_fields = (
+            "specificity",
+            "category_fit",
+            "merchant_fit",
+            "trigger_relevance",
+            "engagement_compulsion",
+        )
+        for field_name in score_fields:
+            value = data.get(field_name)
+            if type(value) is not int or not 0 <= value <= 10:
+                raise ValueError(f"LLM response has an invalid {field_name} score.")
 
-    def _fallback_score(self, action: Dict) -> ScoreResult:
-        """Basic fallback scoring."""
-        body = action.get("body", "").lower()
-        nums = len(re.findall(r'\d+', body))
+        reason_fields = (
+            "specificity_reason",
+            "category_fit_reason",
+            "merchant_fit_reason",
+            "trigger_relevance_reason",
+            "engagement_reason",
+        )
+        if any(not isinstance(data.get(field_name), str) or not data[field_name].strip() for field_name in reason_fields):
+            raise ValueError("LLM response is missing one or more scoring rationales.")
+
         return ScoreResult(
-            specificity=min(10, 3 + nums * 2),
-            specificity_reason="Fallback: counted numbers in message",
-            category_fit=5, category_fit_reason="Could not evaluate",
-            merchant_fit=5, merchant_fit_reason="Could not evaluate",
-            decision_quality=5, decision_quality_reason="Could not evaluate",
-            engagement_compulsion=5, engagement_reason="Could not evaluate",
-            hint="LLM scoring failed - using basic heuristics"
+            specificity=data["specificity"],
+            specificity_reason=data["specificity_reason"],
+            category_fit=data["category_fit"],
+            category_fit_reason=data["category_fit_reason"],
+            merchant_fit=data["merchant_fit"],
+            merchant_fit_reason=data["merchant_fit_reason"],
+            trigger_relevance=data["trigger_relevance"],
+            trigger_relevance_reason=data["trigger_relevance_reason"],
+            engagement_compulsion=data["engagement_compulsion"],
+            engagement_reason=data["engagement_reason"],
+            hint=data.get("hint", ""),
         )
 
 # =============================================================================
@@ -630,6 +657,14 @@ class JudgeSimulator:
         if err:
             print_fail(f"healthz: {err}")
             return False
+        if data.get("status") != "ok" or not all(
+            key in data for key in ("uptime_seconds", "contexts_loaded")
+        ):
+            print_fail(
+                "The bot URL is serving a legacy/incomplete health endpoint. "
+                "Restart the current server.py before running the judge."
+            )
+            return False
         print_success(f"healthz ({lat:.0f}ms)")
 
         data, err, lat = self.client.metadata()
@@ -641,14 +676,20 @@ class JudgeSimulator:
         print_section("CONTEXT PUSH")
         for slug, cat in self.dataset.categories.items():
             data, err, _ = self.client.push_context("category", slug, 1, cat)
-            status = "PASS" if data and data.get("accepted") else "FAIL"
+            status = "PASS" if not err and data and data.get("accepted") else "FAIL"
             print(f"  [{status}] category/{slug}")
+            if status == "FAIL":
+                print_fail(f"category/{slug} context push failed: {err or data}")
+                return False
 
         for mid, m in list(self.dataset.merchants.items())[:5]:
             data, err, _ = self.client.push_context("merchant", mid, 1, m)
-            status = "PASS" if data and data.get("accepted") else "FAIL"
+            status = "PASS" if not err and data and data.get("accepted") else "FAIL"
             short_id = mid.split('_')[1] if '_' in mid else mid[:10]
             print(f"  [{status}] merchant/{short_id}")
+            if status == "FAIL":
+                print_fail(f"merchant/{mid} context push failed: {err or data}")
+                return False
 
         return True
 
@@ -805,31 +846,64 @@ class JudgeSimulator:
 
         print_section("FULL EVALUATION")
 
-        for mid, m in self.dataset.merchants.items():
-            self.client.push_context("merchant", mid, 1, m)
-        for tid, t in self.dataset.triggers.items():
-            self.client.push_context("trigger", tid, 1, t)
+        context_groups = (
+            ("category", self.dataset.categories),
+            ("merchant", self.dataset.merchants),
+            ("customer", self.dataset.customers),
+            ("trigger", self.dataset.triggers),
+        )
+        for scope, records in context_groups:
+            for context_id, payload in records.items():
+                result, error, _ = self.client.push_context(scope, context_id, 1, payload)
+                if error or not result or not result.get("accepted"):
+                    print_fail(f"{scope}/{context_id} context push failed: {error or result}")
+                    return False
 
-        print_success("All contexts pushed")
+        print_success(
+            f"All contexts pushed ({len(self.dataset.categories)} categories, "
+            f"{len(self.dataset.merchants)} merchants, {len(self.dataset.customers)} customers, "
+            f"{len(self.dataset.triggers)} triggers)"
+        )
 
         print_section("SCORING COMPOSITIONS")
         tids = list(self.dataset.triggers.keys())
+        empty_batches = []
+        scoring_failures = 0
 
         for i in range(0, len(tids), 5):
             batch = tids[i:i+5]
-            data, err, lat = self.client.tick(batch)
+            data, err, lat = self.client.tick(batch, now=SIMULATED_TEST_NOW)
 
             if err:
                 print_warn(f"Tick failed: {err}")
+                empty_batches.append(i // 5 + 1)
                 continue
 
             actions = data.get("actions", [])
             print_info(f"Batch {i//5 + 1}: {len(actions)} actions ({lat:.0f}ms)")
+            if not actions:
+                print_fail(
+                    f"Batch {i//5 + 1} returned no actions for active triggers "
+                    f"at {SIMULATED_TEST_NOW.isoformat()}"
+                )
+                empty_batches.append(i // 5 + 1)
+                continue
 
             for action in actions:
-                self._score_and_display(action, verbose=False)
+                try:
+                    self._score_and_display(action, verbose=False)
+                except Exception as error:
+                    scoring_failures += 1
+                    print_fail(f"LLM scoring failed; no score was fabricated: {error}")
 
-        return True
+        if empty_batches:
+            print_fail(f"No actions were returned for batch(es): {empty_batches}")
+        if scoring_failures:
+            print_fail(f"LLM scoring failures: {scoring_failures}")
+        if not self.all_scores:
+            print_fail("No LLM scores were produced; evaluation is incomplete.")
+            return False
+        return not empty_batches and not scoring_failures
 
     def _score_and_display(self, action: Dict, verbose: bool = True):
         """Score an action and display results."""
@@ -860,9 +934,9 @@ class JudgeSimulator:
         if verbose and score.merchant_fit_reason:
             print_reason(score.merchant_fit_reason)
 
-        print_score_bar("Decision Quality", score.decision_quality)
-        if verbose and score.decision_quality_reason:
-            print_reason(score.decision_quality_reason)
+        print_score_bar("Trigger Relevance", score.trigger_relevance)
+        if verbose and score.trigger_relevance_reason:
+            print_reason(score.trigger_relevance_reason)
 
         print_score_bar("Engagement", score.engagement_compulsion)
         if verbose and score.engagement_reason:
@@ -889,7 +963,7 @@ class JudgeSimulator:
             specificity=sum(s.specificity for s in self.all_scores) // n,
             category_fit=sum(s.category_fit for s in self.all_scores) // n,
             merchant_fit=sum(s.merchant_fit for s in self.all_scores) // n,
-            decision_quality=sum(s.decision_quality for s in self.all_scores) // n,
+            trigger_relevance=sum(s.trigger_relevance for s in self.all_scores) // n,
             engagement_compulsion=sum(s.engagement_compulsion for s in self.all_scores) // n,
             penalties=sum(s.penalties for s in self.all_scores)
         )
@@ -899,7 +973,7 @@ class JudgeSimulator:
         print_score_bar("Avg Specificity", avg.specificity)
         print_score_bar("Avg Category Fit", avg.category_fit)
         print_score_bar("Avg Merchant Fit", avg.merchant_fit)
-        print_score_bar("Avg Decision Quality", avg.decision_quality)
+        print_score_bar("Avg Trigger Relevance", avg.trigger_relevance)
         print_score_bar("Avg Engagement", avg.engagement_compulsion)
 
         total = avg.total
