@@ -558,7 +558,11 @@ async function initialize() {
     requestJson('/v1/metadata'),
   ]);
   if (healthResult.status === 'fulfilled' && healthResult.value.status === 'ok') {
-    setApiStatus('online', 'API connected');
+    const storageMode = healthResult.value.context_store;
+    setApiStatus(
+      'online',
+      storageMode === 'shared' ? 'API connected' : 'API online · memory only',
+    );
   } else {
     setApiStatus('offline', 'API unavailable');
     $('#global-error-text').textContent = healthResult.status === 'rejected' ? healthResult.reason.message : 'The bot health check did not pass.';

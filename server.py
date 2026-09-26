@@ -156,7 +156,7 @@ async def tick(request: Request):
     try:
         data = await request.json()
     except (json.JSONDecodeError, ValueError):
-        data = {}
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
     return {"actions": tick_actions(data)}
 
 
