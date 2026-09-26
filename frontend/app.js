@@ -400,6 +400,28 @@ function saveChat() {
 
 let chatMessages = [];
 let failedChatMessage = null;
+let activeConversationId = null;
+let chatEnded = false;
+
+function newConversationId(merchantId) {
+  const token = globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  return `web_${merchantId}_${token}`;
+}
+
+function conversationIdFor(merchantId, reset = false) {
+  const key = `vera-conversation:${merchantId}`;
+  try {
+    if (!reset) {
+      const current = localStorage.getItem(key);
+      if (current) return current;
+    }
+    const conversationId = newConversationId(merchantId);
+    localStorage.setItem(key, conversationId);
+    return conversationId;
+  } catch {
+    return newConversationId(merchantId);
+  }
+}
 
 function renderChat() {
   const history = $('#chat-history');
@@ -475,9 +497,13 @@ async function loadWorkspace(merchantId) {
     renderActivity(data.activity || []);
     renderRecordedMessages(data.recent_ai_messages || []);
     chatMessages = storedChat(selectedMerchantId);
+    activeConversationId = conversationIdFor(selectedMerchantId);
+    chatEnded = chatMessages.at(-1)?.role === 'system' && chatMessages.at(-1)?.body.includes('conversation has been ended');
+    failedChatMessage = null;
     renderChat();
-    $('#chat-input').disabled = false;
-    $('#chat-send').disabled = false;
+    $('#chat-input').disabled = chatEnded;
+    $('#chat-send').disabled = chatEnded;
+    if (chatEnded) $('#assistant-presence').innerHTML = '<i></i> Conversation ended';
     $('#global-error').hidden = true;
   } catch (error) {
     if (error.name === 'AbortError') return;
@@ -492,6 +518,7 @@ async function loadWorkspace(merchantId) {
 async function sendChat(event, retryMessage = null) {
   event.preventDefault();
   const input = $('#chat-input');
+  if (chatEnded) return;
   const value = retryMessage || input.value.trim();
   if (!value || !selectedMerchantId) return;
   const message = value.slice(0, 1200);
@@ -516,7 +543,7 @@ async function sendChat(event, retryMessage = null) {
     const response = await requestJson('/v1/reply', {
       method: 'POST',
       body: JSON.stringify({
-        conversation_id: `web_${selectedMerchantId}`,
+        conversation_id: activeConversationId,
         merchant_id: selectedMerchantId,
         from_role: 'merchant',
         message,
@@ -530,6 +557,7 @@ async function sendChat(event, retryMessage = null) {
     } else if (response.action === 'wait') {
       addChatMessage({ role: 'system', body: `Vera will follow up in ${Math.max(1, Math.round(response.wait_seconds / 60))} minutes.`, time: new Date().toISOString() });
     } else if (response.action === 'end') {
+      chatEnded = true;
       addChatMessage({ role: 'system', body: 'This conversation has been ended. Vera will not send further messages.', time: new Date().toISOString() });
     } else {
       throw new Error('The assistant returned an unsupported response.');
@@ -548,8 +576,8 @@ async function sendChat(event, retryMessage = null) {
     $('#chat-error').hidden = false;
     $('#assistant-presence').innerHTML = '<i></i> Connection issue';
   } finally {
-    input.disabled = false;
-    $('#chat-send').disabled = false;
+    input.disabled = chatEnded;
+    $('#chat-send').disabled = chatEnded;
     const retryButton = $('#chat-error .chat-retry');
     if (retryButton) retryButton.disabled = false;
     input.focus();
@@ -621,9 +649,15 @@ $('#chat-input').addEventListener('input', (event) => {
 $('#clear-chat').addEventListener('click', () => {
   if (!selectedMerchantId) return;
   chatMessages = [];
+  chatEnded = false;
+  failedChatMessage = null;
+  activeConversationId = conversationIdFor(selectedMerchantId, true);
   saveChat();
   renderChat();
   $('#chat-error').hidden = true;
+  $('#chat-input').disabled = false;
+  $('#chat-send').disabled = false;
+  $('#assistant-presence').innerHTML = '<i></i> Ready';
   toast('This browser chat was cleared. Recorded merchant history is unchanged.');
 });
 $('#draft-close').addEventListener('click', () => $('#draft-dialog').close());
