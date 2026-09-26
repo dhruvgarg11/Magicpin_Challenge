@@ -186,7 +186,9 @@ async function loadScenarioPreview(testId) {
     $('#preview-merchant').textContent = scenario.merchant_name;
     $('#preview-context-line').textContent = [scenario.category, scenario.city, scenario.customer_name && `Customer · ${scenario.customer_name}`].filter(Boolean).map(formatLabel).join(' · ');
     $('#preview-message').textContent = result.message?.body || 'No message body was returned.';
-    $('#preview-action').textContent = [result.message?.cta && `CTA · ${formatLabel(result.message.cta)}`, result.message?.send_as && `Sent as · ${formatLabel(result.message.send_as)}`].filter(Boolean).join(' · ') || 'No action metadata returned';
+    $('#preview-cta').textContent = result.message?.cta ? formatLabel(result.message.cta) : 'No data available';
+    $('#preview-send-as').textContent = result.message?.send_as ? formatLabel(result.message.send_as) : 'No data available';
+    $('#preview-suppression').textContent = result.message?.suppression_key || 'No data available';
     $('#preview-rationale').textContent = result.message?.rationale || 'No rationale was returned for this scenario.';
     const context = {
       category: result.category,
@@ -397,6 +399,7 @@ function saveChat() {
 }
 
 let chatMessages = [];
+let failedChatMessage = null;
 
 function renderChat() {
   const history = $('#chat-history');
@@ -486,18 +489,21 @@ async function loadWorkspace(merchantId) {
   }
 }
 
-async function sendChat(event) {
+async function sendChat(event, retryMessage = null) {
   event.preventDefault();
   const input = $('#chat-input');
-  const value = input.value.trim();
+  const value = retryMessage || input.value.trim();
   if (!value || !selectedMerchantId) return;
   const message = value.slice(0, 1200);
-  input.value = '';
-  input.style.height = 'auto';
+  if (!retryMessage) {
+    input.value = '';
+    input.style.height = 'auto';
+    addChatMessage({ role: 'user', body: message, time: new Date().toISOString() });
+  }
   $('#chat-send').disabled = true;
   input.disabled = true;
   $('#chat-error').hidden = true;
-  addChatMessage({ role: 'user', body: message, time: new Date().toISOString() });
+  $('#chat-error').replaceChildren();
 
   const history = $('#chat-history');
   const typing = make('article', 'chat-message assistant typing-message');
@@ -528,15 +534,24 @@ async function sendChat(event) {
     } else {
       throw new Error('The assistant returned an unsupported response.');
     }
+    failedChatMessage = null;
     $('#assistant-presence').innerHTML = '<i></i> Ready';
   } catch (error) {
     typing.remove();
-    $('#chat-error').textContent = `Vera could not respond: ${error.message}. Your message is still visible above; try sending it again.`;
+    failedChatMessage = message;
+    const errorText = make('span', '', `Vera could not respond: ${error.message}. Your message remains in the conversation.`);
+    const retryButton = make('button', 'chat-retry', 'Retry');
+    retryButton.type = 'button';
+    retryButton.disabled = true;
+    retryButton.addEventListener('click', (retryEvent) => sendChat(retryEvent, failedChatMessage));
+    $('#chat-error').replaceChildren(errorText, retryButton);
     $('#chat-error').hidden = false;
     $('#assistant-presence').innerHTML = '<i></i> Connection issue';
   } finally {
     input.disabled = false;
     $('#chat-send').disabled = false;
+    const retryButton = $('#chat-error .chat-retry');
+    if (retryButton) retryButton.disabled = false;
     input.focus();
   }
 }

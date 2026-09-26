@@ -177,6 +177,11 @@ def context_payload(scope, context_id):
 def _timestamp(value):
     if not value:
         return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _claim_suppression(key):
@@ -188,11 +193,6 @@ def _claim_suppression(key):
         return False
     _sent_suppression_keys.add(key)
     return True
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
-    except (AttributeError, TypeError, ValueError):
-        return None
 
 
 def tick_actions(data):
