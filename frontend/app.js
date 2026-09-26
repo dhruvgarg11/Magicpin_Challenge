@@ -219,7 +219,7 @@ document.querySelector('#reply-form').addEventListener('submit', async (event) =
     const copy = {
       end: ['warning', 'End conversation · Vera will stop messaging.'],
       send: ['success', `Send response · “${result.body}”`],
-      wait: ['neutral', `Wait ${result.wait_seconds} seconds · No automatic reply yet.`],
+      wait: ['neutral', `Vera will follow up in ${Math.ceil(result.wait_seconds / 60)} minutes.`],
     }[result.action] || ['neutral', 'No action returned.'];
     replyResult.className = `reply-result ${copy[0]}`;
     replyResult.lastElementChild.textContent = copy[1];

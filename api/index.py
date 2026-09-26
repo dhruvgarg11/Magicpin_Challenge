@@ -4,6 +4,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from bot import compose
+from reply_logic import handle_reply
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "dataset" / "expanded"
@@ -115,15 +116,6 @@ class handler(BaseHTTPRequestHandler):
         elif path == "/v1/tick":
             self.send_json({"actions": []})
         elif path == "/v1/reply":
-            lower = data.get("message", "").strip().lower()
-            if any(term in lower for term in ("stop messaging", "stop", "spam", "useless")):
-                self.send_json({"action": "end"})
-            elif any(term in lower for term in ("ok lets do it", "ok, lets do it", "whats next", "what's next")):
-                self.send_json({
-                    "action": "send",
-                    "body": "Done — I’ll help you with the next step.",
-                })
-            else:
-                self.send_json({"action": "wait", "wait_seconds": 5})
+            self.send_json(handle_reply(data))
         else:
             self.send_json({"error": "Not found"}, 404)

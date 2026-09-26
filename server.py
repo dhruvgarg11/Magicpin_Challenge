@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from bot import compose
+from reply_logic import handle_reply
 
 ROOT = Path(__file__).parent
 FRONTEND = ROOT / "frontend"
@@ -140,18 +141,7 @@ async def reply(request: Request):
     except (json.JSONDecodeError, ValueError):
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
-    message = data.get("message", "").strip()
-    lower = message.lower()
-    if any(term in lower for term in ("stop messaging", "stop", "spam", "useless")):
-        return {"action": "end"}
-
-    if any(term in lower for term in ("ok lets do it", "ok, lets do it", "whats next", "what's next")):
-        return {
-            "action": "send",
-            "body": "Done — I’ll help you with the next step.",
-        }
-
-    return {"action": "wait", "wait_seconds": 5}
+    return handle_reply(data)
 
 
 if __name__ == "__main__":
