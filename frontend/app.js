@@ -1,235 +1,468 @@
-const scenarioList = document.querySelector('#scenario-list');
-const searchInput = document.querySelector('#scenario-search');
-const apiStatus = document.querySelector('#api-status');
-const previewTitle = document.querySelector('#preview-title');
-const messageBody = document.querySelector('#message-body');
-const copyButton = document.querySelector('#copy-button');
-const contextToggle = document.querySelector('#context-toggle');
-const contextJson = document.querySelector('#context-json');
-const contextSummary = document.querySelector('#context-summary');
-const replyResult = document.querySelector('#reply-result');
+const $ = (selector) => document.querySelector(selector);
+const numberFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
+const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 
-let scenarios = [];
-let selectedId = null;
-let activeCategory = 'all';
-let selectedResult = null;
+let apiBase = window.location.origin;
+let workspaceData = null;
+let selectedMerchantId = null;
+let workspaceRequest;
+let toastTimer;
 
-const titleCase = (value) => value
-  .replaceAll('_', ' ')
-  .replace(/\b\w/g, (letter) => letter.toUpperCase());
-
-const categoryClasses = {
-  restaurants: 'food',
-  salons: 'salon',
-  gyms: 'gym',
-  dentists: 'dentist',
-  pharmacies: 'pharmacy',
-};
-
-function setApiStatus(online) {
-  apiStatus.className = `api-indicator ${online ? 'online' : 'offline'}`;
-  apiStatus.innerHTML = `<i></i> ${online ? 'Engine connected' : 'Engine offline'}`;
+function apiUrl(path) {
+  return `${apiBase}${path}`;
 }
 
-function renderScenarios() {
-  const query = searchInput.value.trim().toLowerCase();
-  const visible = scenarios.filter((item) => {
-    const matchesCategory = activeCategory === 'all' || item.category === activeCategory;
-    const searchable = `${item.merchant_name} ${item.kind} ${item.category} ${item.city} ${item.test_id}`.toLowerCase();
-    return matchesCategory && searchable.includes(query);
+async function requestJson(path, options = {}) {
+  const response = await fetch(apiUrl(path), {
+    ...options,
+    headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers },
   });
-  document.querySelector('#result-count').textContent = visible.length;
-  scenarioList.replaceChildren();
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error(`The service returned an unreadable response (${response.status}).`);
+  }
+  if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
+  return data;
+}
 
-  if (!visible.length) {
-    const empty = document.createElement('div');
-    empty.className = 'empty-list';
-    empty.textContent = 'No scenarios match your search.';
-    scenarioList.append(empty);
+function setApiStatus(state, label) {
+  const status = $('#api-status');
+  status.className = `api-indicator ${state}`;
+  status.querySelector('span').textContent = label;
+  $('#sidebar-status').textContent = state === 'online' ? 'Bot online' : state === 'offline' ? 'Bot unavailable' : 'Checking status';
+  $('#sidebar-status-dot').classList.toggle('offline', state === 'offline');
+}
+
+function toast(message, type = 'info') {
+  const region = $('#toast-region');
+  const item = document.createElement('div');
+  item.className = `toast ${type}`;
+  item.textContent = message;
+  region.replaceChildren(item);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => item.remove(), 4200);
+}
+
+function text(element, value, empty = '—') {
+  element.textContent = value === null || value === undefined || value === '' ? empty : value;
+}
+
+function formatNumber(value) {
+  return typeof value === 'number' ? numberFormat.format(value) : '—';
+}
+
+function formatPercent(value) {
+  return typeof value === 'number' ? `${(value * 100).toFixed(value * 100 % 1 ? 1 : 0)}%` : '—';
+}
+
+function formatLabel(value) {
+  return String(value || '').replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatTimestamp(value) {
+  if (!value) return 'Time not recorded';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : dateFormat.format(date);
+}
+
+function make(tag, className, content) {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (content !== undefined) element.textContent = content;
+  return element;
+}
+
+function payloadFacts(payload = {}) {
+  return Object.entries(payload)
+    .filter(([key, value]) => !['placeholder', 'merchant_last_message'].includes(key) && value !== null && value !== '' && typeof value !== 'object')
+    .slice(0, 3)
+    .map(([key, value]) => `${formatLabel(key)}: ${typeof value === 'boolean' ? (value ? 'Yes' : 'No') : value}`);
+}
+
+function renderMerchantOptions(merchants, selectedId) {
+  const select = $('#merchant-select');
+  select.replaceChildren();
+  for (const merchant of merchants) {
+    const option = make('option', '', `${merchant.name}${merchant.city ? ` · ${merchant.city}` : ''}`);
+    option.value = merchant.merchant_id;
+    option.selected = merchant.merchant_id === selectedId;
+    select.append(option);
+  }
+  select.disabled = !merchants.length;
+}
+
+function renderMetrics(merchant) {
+  const performance = merchant.performance || {};
+  const windowDays = performance.window_days;
+  const period = windowDays ? `Last ${windowDays} days` : 'Reporting period unavailable';
+  const metrics = [
+    ['views', 'views', performance.delta_7d?.views_pct],
+    ['calls', 'calls', performance.delta_7d?.calls_pct],
+    ['directions', 'directions', performance.delta_7d?.directions_pct],
+    ['leads', 'leads', performance.delta_7d?.leads_pct],
+  ];
+  for (const [id, key, delta] of metrics) {
+    const value = performance[key];
+    text($(`#metric-${id}`), formatNumber(value), 'Not recorded');
+    const footer = $(`#metric-${id}-foot`);
+    if (typeof delta === 'number') {
+      footer.replaceChildren(make('span', delta >= 0 ? 'trend positive' : 'trend negative', `${delta >= 0 ? '+' : ''}${formatPercent(delta)}`), document.createTextNode(` · ${period}`));
+    } else {
+      footer.textContent = period;
+    }
+  }
+  const ctr = performance.ctr;
+  $('#merchant-subtitle').textContent = [
+    merchant.identity?.locality,
+    merchant.identity?.city,
+    merchant.category_slug ? formatLabel(merchant.category_slug) : null,
+    typeof ctr === 'number' ? `${formatPercent(ctr)} profile CTR` : null,
+  ].filter(Boolean).join(' · ') || 'Merchant profile and performance context';
+}
+
+function renderTriggers(triggers) {
+  const list = $('#trigger-list');
+  list.replaceChildren();
+  $('#trigger-count').textContent = triggers.length;
+  $('#insight-total').textContent = triggers.length;
+  if (!triggers.length) {
+    list.append(make('div', 'empty-state', 'No trigger data available yet.'));
+    $('#trigger-footer').textContent = 'New merchant signals will appear here when available.';
     return;
   }
 
-  for (const item of visible) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = `scenario-option${item.test_id === selectedId ? ' selected' : ''}`;
-    button.setAttribute('role', 'option');
-    button.setAttribute('aria-selected', String(item.test_id === selectedId));
-    const icon = document.createElement('span');
-    icon.className = `scenario-icon ${categoryClasses[item.category] || ''}`;
-    icon.textContent = item.category.slice(0, 1).toUpperCase();
-    const copy = document.createElement('span');
-    copy.className = 'scenario-copy';
-    const name = document.createElement('strong');
-    name.textContent = item.merchant_name;
-    const meta = document.createElement('small');
-    meta.textContent = `${titleCase(item.kind)} · ${item.city}`;
-    copy.append(name, meta);
-    const urgency = document.createElement('span');
-    urgency.className = 'scenario-urgency';
-    urgency.textContent = item.test_id;
-    button.append(icon, copy, urgency);
-    button.addEventListener('click', () => selectScenario(item.test_id));
-    scenarioList.append(button);
+  for (const trigger of triggers.slice(0, 8)) {
+    const row = make('article', 'trigger-item');
+    const symbol = make('span', 'trigger-symbol', formatLabel(trigger.kind).slice(0, 1) || '•');
+    const body = make('div', 'trigger-body');
+    const titleRow = make('div', 'trigger-title-row');
+    titleRow.append(make('h3', '', formatLabel(trigger.kind)));
+    if (typeof trigger.urgency === 'number') titleRow.append(make('span', 'urgency-label', `Priority ${trigger.urgency}`));
+    body.append(titleRow);
+    const facts = payloadFacts(trigger.payload);
+    if (facts.length) body.append(make('p', 'trigger-facts', facts.join(' · ')));
+    if (trigger.customer?.identity?.name) body.append(make('span', 'trigger-customer', `Customer · ${trigger.customer.identity.name}`));
+    const action = make('button', 'draft-button', 'Draft message');
+    action.type = 'button';
+    action.dataset.triggerId = trigger.id;
+    action.addEventListener('click', () => draftTrigger(trigger));
+    row.append(symbol, body, action);
+    list.append(row);
   }
+  $('#trigger-footer').textContent = triggers.length > 8 ? `Showing 8 of ${triggers.length} recorded triggers.` : `${triggers.length} recorded trigger${triggers.length === 1 ? '' : 's'} for this merchant.`;
 }
 
-function showMessage(message) {
-  messageBody.replaceChildren();
-  messageBody.append(document.createTextNode(message.body || 'No message was generated.'));
-  const time = document.createElement('span');
-  time.className = 'message-time';
-  time.innerHTML = 'now <b>✓✓</b>';
-  messageBody.append(time);
+function renderContext(data) {
+  const merchant = data.merchant;
+  const identity = merchant.identity || {};
+  const category = data.category;
+  const body = $('#merchant-context-body');
+  body.replaceChildren();
+  $('#verified-badge').hidden = !identity.verified;
+  const sidebarCard = make('div', 'sidebar-context-card');
+  sidebarCard.append(
+    make('strong', '', identity.name || 'Merchant'),
+    make('span', '', [category?.display_name, identity.locality, identity.city].filter(Boolean).join(' · ') || 'No category or location recorded.'),
+  );
+  $('#sidebar-context').replaceChildren(make('span', 'section-kicker', 'CURRENT CONTEXT'), sidebarCard);
+
+  const details = make('div', 'profile-details');
+  const fields = [
+    ['Owner', identity.owner_first_name],
+    ['Location', [identity.locality, identity.city].filter(Boolean).join(', ')],
+    ['Category', category?.display_name || formatLabel(merchant.category_slug)],
+    ['Membership', merchant.subscription?.plan],
+  ];
+  for (const [label, value] of fields) {
+    const item = make('div', 'profile-field');
+    item.append(make('span', 'profile-label', label), make('strong', '', value || 'Not recorded'));
+    details.append(item);
+  }
+  body.append(details);
+
+  if (category?.voice?.tone) {
+    const tone = make('div', 'voice-context');
+    tone.append(make('span', 'profile-label', 'CATEGORY VOICE'), make('strong', '', formatLabel(category.voice.tone)));
+    body.append(tone);
+  }
+  if (Array.isArray(merchant.offers) && merchant.offers.length) {
+    const offers = make('div', 'offer-context');
+    offers.append(make('span', 'profile-label', 'RECORDED OFFERS'));
+    const list = make('ul', 'offer-list');
+    for (const offer of merchant.offers.slice(0, 3)) {
+      const item = make('li', '', offer.title || 'Untitled offer');
+      if (offer.status) item.append(make('span', 'offer-status', formatLabel(offer.status)));
+      list.append(item);
+    }
+    offers.append(list);
+    body.append(offers);
+  }
+  const signals = Array.isArray(merchant.signals) ? merchant.signals : [];
+  if (signals.length) {
+    const tags = make('div', 'signal-tags');
+    for (const signal of signals) tags.append(make('span', 'signal-tag', formatLabel(signal)));
+    body.append(tags);
+  }
+  if (!category && !identity.owner_first_name && !merchant.subscription && !merchant.offers?.length && !signals.length) {
+    body.append(make('div', 'empty-state', 'No additional merchant context available.'));
+  }
+  $('#assistant-context').textContent = `${identity.name || 'Selected merchant'}${identity.city ? ` · ${identity.city}` : ''}`;
 }
 
-async function selectScenario(testId) {
-  selectedId = testId;
-  const scenario = scenarios.find((item) => item.test_id === testId);
-  renderScenarios();
-  previewTitle.textContent = `${scenario.test_id} · ${titleCase(scenario.kind)}`;
-  document.querySelector('#merchant-name').textContent = scenario.merchant_name;
-  document.querySelector('#merchant-meta').textContent = `${scenario.category.replaceAll('_', ' ')} · ${scenario.city} · ${scenario.owner_name}`;
-  document.querySelector('#merchant-avatar').textContent = scenario.merchant_name.trim().charAt(0).toUpperCase();
-  document.querySelector('#message-status-text').textContent = 'Generating from project data';
-  document.querySelector('.message-status').classList.remove('ready');
-  copyButton.disabled = true;
-  contextToggle.disabled = true;
-  contextToggle.textContent = 'View data ↗';
-  contextJson.hidden = true;
-
-  try {
-    const response = await fetch('/v1/demo/compose', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ test_id: testId }),
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || 'Could not compose message');
-    selectedResult = result;
-    showMessage(result.message);
-    document.querySelector('#rationale-text').textContent = result.message.rationale || 'No rationale was returned.';
-    const tags = [scenario.category, scenario.kind, scenario.customer_name ? 'personalized' : 'merchant context'];
-    const tagContainer = document.querySelector('#reason-tags');
-    tagContainer.replaceChildren(...tags.map((text) => {
-      const tag = document.createElement('span');
-      tag.className = 'reason-tag';
-      tag.textContent = text.replaceAll('_', ' ');
-      return tag;
-    }));
-    const owner = scenario.owner_name ? `Owner: ${scenario.owner_name}` : 'Owner context available';
-    const customer = scenario.customer_name ? ` · Customer: ${scenario.customer_name}` : ' · No customer record';
-    contextSummary.textContent = `${scenario.merchant_name} · ${scenario.city} · ${titleCase(scenario.kind)} · ${owner}${customer}`;
-    contextJson.textContent = JSON.stringify({
-      category: result.merchant.category_slug,
-      merchant: result.merchant,
-      trigger: result.trigger,
-      customer: result.customer,
-    }, null, 2);
-    copyButton.disabled = false;
-    contextToggle.disabled = false;
-    document.querySelector('#message-status-text').textContent = `Ready · ${result.message.send_as || 'vera'}`;
-    document.querySelector('.message-status').classList.add('ready');
-    setApiStatus(true);
-  } catch (error) {
-    showMessage({ body: error.message });
-    document.querySelector('#message-status-text').textContent = 'Could not reach the message engine';
-    setApiStatus(false);
-  }
-}
-
-async function loadScenarios() {
-  try {
-    const response = await fetch('/v1/demo/scenarios');
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Scenario library unavailable');
-    scenarios = data.scenarios;
-    document.querySelector('#stat-scenarios').textContent = String(scenarios.length).padStart(2, '0');
-    document.querySelector('#nav-count').textContent = scenarios.length;
-    document.querySelector('#stat-customers').textContent = `${scenarios.filter((item) => item.customer_id).length} / ${scenarios.length}`;
-    setApiStatus(true);
-    renderScenarios();
-    if (scenarios.length) selectScenario(scenarios[0].test_id);
-  } catch (error) {
-    scenarioList.innerHTML = '';
-    const empty = document.createElement('div');
-    empty.className = 'empty-list';
-    empty.textContent = error.message;
-    scenarioList.append(empty);
-    setApiStatus(false);
-  }
-}
-
-document.querySelectorAll('.filter-chip').forEach((button) => {
-  button.addEventListener('click', () => {
-    activeCategory = button.dataset.category;
-    document.querySelectorAll('.filter-chip').forEach((chip) => chip.classList.toggle('selected', chip === button));
-    renderScenarios();
-  });
-});
-
-searchInput.addEventListener('input', renderScenarios);
-document.addEventListener('keydown', (event) => {
-  if (event.key === '/' && document.activeElement !== searchInput && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
-    event.preventDefault();
-    searchInput.focus();
-  }
-  if (event.key === 'Escape' && document.activeElement === searchInput) searchInput.blur();
-});
-
-document.querySelector('#refresh-button').addEventListener('click', () => {
-  if (selectedId) selectScenario(selectedId);
-});
-
-copyButton.addEventListener('click', async () => {
-  if (!selectedResult) return;
-  try {
-    await navigator.clipboard.writeText(selectedResult.message.body);
-    copyButton.innerHTML = '<span>✓</span> Copied';
-    setTimeout(() => { copyButton.innerHTML = '<span>▢</span> Copy message'; }, 1400);
-  } catch {
-    copyButton.innerHTML = '<span>!</span> Clipboard unavailable';
-  }
-});
-
-contextToggle.addEventListener('click', () => {
-  contextJson.hidden = !contextJson.hidden;
-  contextToggle.innerHTML = contextJson.hidden ? 'View data <span>↗</span>' : 'Hide data <span>↙</span>';
-});
-
-document.querySelector('#reply-form').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const input = document.querySelector('#reply-input');
-  const message = input.value.trim();
-  if (!message) {
-    input.focus();
+function renderActivity(entries) {
+  const list = $('#activity-list');
+  list.replaceChildren();
+  $('#activity-total').textContent = entries.length;
+  if (!entries.length) {
+    list.append(make('div', 'empty-state', 'No conversation history available for this merchant.'));
     return;
   }
-  const submit = document.querySelector('#reply-submit');
-  submit.disabled = true;
-  replyResult.className = 'reply-result';
-  replyResult.lastElementChild.textContent = 'Checking reply…';
+  for (const entry of entries.slice(0, 5)) {
+    const row = make('article', 'activity-item');
+    row.append(make('span', `activity-marker ${entry.from === 'vera' ? 'vera' : 'merchant'}`, entry.from === 'vera' ? 'V' : 'M'));
+    const content = make('div', 'activity-copy');
+    content.append(make('div', 'activity-meta', `${entry.from === 'vera' ? 'Vera' : formatLabel(entry.from || 'Merchant')} · ${formatTimestamp(entry.ts)}`));
+    content.append(make('p', '', entry.body || 'No message text recorded.'));
+    if (entry.engagement) content.append(make('span', 'engagement-tag', formatLabel(entry.engagement)));
+    row.append(content);
+    list.append(row);
+  }
+}
+
+function renderRecordedMessages(entries) {
+  const list = $('#generated-list');
+  list.replaceChildren();
+  $('#message-total').textContent = entries.length;
+  if (!entries.length) {
+    list.append(make('div', 'empty-state', 'No Vera messages are recorded in this merchant’s history yet.'));
+    return;
+  }
+  for (const entry of entries.slice(0, 4)) {
+    const item = make('article', 'generated-item');
+    item.append(make('p', '', entry.body || 'No message text recorded.'), make('time', '', formatTimestamp(entry.ts)));
+    list.append(item);
+  }
+}
+
+function storedChat(merchantId) {
   try {
-    const response = await fetch('/v1/reply', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message }),
-    });
-    const result = await response.json();
-    const copy = {
-      end: ['warning', 'End conversation · Vera will stop messaging.'],
-      send: ['success', `Send response · “${result.body}”`],
-      wait: ['neutral', `Vera will follow up in ${Math.ceil(result.wait_seconds / 60)} minutes.`],
-    }[result.action] || ['neutral', 'No action returned.'];
-    replyResult.className = `reply-result ${copy[0]}`;
-    replyResult.lastElementChild.textContent = copy[1];
+    const saved = JSON.parse(localStorage.getItem(`vera-chat:${merchantId}`) || '[]');
+    return Array.isArray(saved) ? saved : [];
   } catch {
-    replyResult.className = 'reply-result warning';
-    replyResult.lastElementChild.textContent = 'Could not reach the reply endpoint.';
+    return [];
+  }
+}
+
+function saveChat() {
+  if (!selectedMerchantId) return;
+  try {
+    localStorage.setItem(`vera-chat:${selectedMerchantId}`, JSON.stringify(chatMessages));
+  } catch {
+    toast('Chat history could not be saved in this browser.', 'error');
+  }
+}
+
+let chatMessages = [];
+
+function renderChat() {
+  const history = $('#chat-history');
+  history.replaceChildren();
+  if (!chatMessages.length) {
+    const empty = make('div', 'chat-empty');
+    empty.append(make('span', 'chat-empty-mark', 'v.'), make('strong', '', 'Good to have you here.'), make('p', '', 'Ask about performance, offers, or what to focus on next.'));
+    history.append(empty);
+    return;
+  }
+  for (const message of chatMessages) {
+    const item = make('article', `chat-message ${message.role}`);
+    item.append(make('span', 'chat-sender', message.role === 'assistant' ? 'VERA' : 'YOU'));
+    item.append(make('p', 'chat-text', message.body));
+    if (message.cta) item.append(make('span', 'chat-cta', formatLabel(message.cta)));
+    if (message.time) item.append(make('time', '', formatTimestamp(message.time)));
+    history.append(item);
+  }
+  history.scrollTop = history.scrollHeight;
+}
+
+function addChatMessage(message) {
+  chatMessages.push(message);
+  saveChat();
+  renderChat();
+}
+
+async function draftTrigger(trigger) {
+  const button = [...document.querySelectorAll('.draft-button')].find((item) => item.dataset.triggerId === trigger.id);
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Drafting…';
+  }
+  try {
+    const result = await requestJson('/v1/compose', {
+      method: 'POST',
+      body: JSON.stringify({ merchant_id: selectedMerchantId, trigger_id: trigger.id, customer_id: trigger.customer_id || null }),
+    });
+    $('#draft-message').textContent = result.message.body;
+    const details = [result.message.cta && `Action · ${formatLabel(result.message.cta)}`, result.message.send_as && `Voice · ${formatLabel(result.message.send_as)}`, result.message.rationale].filter(Boolean);
+    $('#draft-details').replaceChildren(...details.map((item) => make('p', '', item)));
+    $('#draft-dialog').showModal();
+  } catch (error) {
+    toast(`Could not draft this message: ${error.message}`, 'error');
   } finally {
-    submit.disabled = false;
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Draft message';
+    }
+  }
+}
+
+async function loadWorkspace(merchantId) {
+  workspaceRequest?.abort();
+  workspaceRequest = new AbortController();
+  const select = $('#merchant-select');
+  select.disabled = true;
+  $('#global-error').hidden = true;
+  $('#trigger-list').replaceChildren(make('div', 'loading-state', 'Loading merchant signals…'));
+  try {
+    const query = merchantId ? `?merchant_id=${encodeURIComponent(merchantId)}` : '';
+    const data = await requestJson(`/v1/workspace${query}`, { signal: workspaceRequest.signal });
+    workspaceData = data;
+    selectedMerchantId = data.merchant.merchant_id;
+    const identity = data.merchant.identity || {};
+    $('#merchant-heading').replaceChildren(document.createTextNode(identity.name || 'Merchant workspace'), make('span', 'heading-period', '.'));
+    $('#breadcrumb-merchant').textContent = identity.name || 'Merchant';
+    $('#footer-model').textContent = 'VERA MERCHANT AI';
+    renderMerchantOptions(data.merchants, selectedMerchantId);
+    renderMetrics(data.merchant);
+    renderTriggers(data.triggers || []);
+    renderContext(data);
+    renderActivity(data.activity || []);
+    renderRecordedMessages(data.recent_ai_messages || []);
+    chatMessages = storedChat(selectedMerchantId);
+    renderChat();
+    $('#chat-input').disabled = false;
+    $('#chat-send').disabled = false;
+    $('#global-error').hidden = true;
+  } catch (error) {
+    if (error.name === 'AbortError') return;
+    $('#global-error-text').textContent = error.message;
+    $('#global-error').hidden = false;
+    $('#trigger-list').replaceChildren(make('div', 'empty-state error-state', `Could not load merchant insights: ${error.message}`));
+    $('#merchant-select').disabled = false;
+    toast(error.message, 'error');
+  }
+}
+
+async function sendChat(event) {
+  event.preventDefault();
+  const input = $('#chat-input');
+  const value = input.value.trim();
+  if (!value || !selectedMerchantId) return;
+  const message = value.slice(0, 1200);
+  input.value = '';
+  input.style.height = 'auto';
+  $('#chat-send').disabled = true;
+  input.disabled = true;
+  $('#chat-error').hidden = true;
+  addChatMessage({ role: 'user', body: message, time: new Date().toISOString() });
+
+  const history = $('#chat-history');
+  const typing = make('article', 'chat-message assistant typing-message');
+  typing.append(make('span', 'chat-sender', 'VERA'), make('p', 'typing-dots', 'Vera is thinking…'));
+  history.append(typing);
+  history.scrollTop = history.scrollHeight;
+  $('#assistant-presence').innerHTML = '<i></i> Thinking';
+
+  try {
+    const response = await requestJson('/v1/reply', {
+      method: 'POST',
+      body: JSON.stringify({
+        conversation_id: `web_${selectedMerchantId}`,
+        merchant_id: selectedMerchantId,
+        from_role: 'merchant',
+        message,
+        received_at: new Date().toISOString(),
+        turn_number: chatMessages.filter((item) => item.role === 'user').length,
+      }),
+    });
+    typing.remove();
+    if (response.action === 'send') {
+      addChatMessage({ role: 'assistant', body: response.body, cta: response.cta, time: new Date().toISOString() });
+    } else if (response.action === 'wait') {
+      addChatMessage({ role: 'system', body: `Vera will follow up in ${Math.max(1, Math.round(response.wait_seconds / 60))} minutes.`, time: new Date().toISOString() });
+    } else if (response.action === 'end') {
+      addChatMessage({ role: 'system', body: 'This conversation has been ended. Vera will not send further messages.', time: new Date().toISOString() });
+    } else {
+      throw new Error('The assistant returned an unsupported response.');
+    }
+    $('#assistant-presence').innerHTML = '<i></i> Ready';
+  } catch (error) {
+    typing.remove();
+    $('#chat-error').textContent = `Vera could not respond: ${error.message}. Your message is still visible above; try sending it again.`;
+    $('#chat-error').hidden = false;
+    $('#assistant-presence').innerHTML = '<i></i> Connection issue';
+  } finally {
+    input.disabled = false;
+    $('#chat-send').disabled = false;
+    input.focus();
+  }
+}
+
+async function initialize() {
+  $('#today-label').textContent = new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric' }).format(new Date()).toUpperCase();
+  try {
+    const config = await requestJson('/v1/config');
+    if (config.api_base_url) apiBase = config.api_base_url.replace(/\/$/, '');
+  } catch (error) {
+    setApiStatus('offline', 'API configuration unavailable');
+    $('#global-error-text').textContent = `Could not read API configuration: ${error.message}`;
+    $('#global-error').hidden = false;
+    return;
+  }
+
+  const [healthResult, metadataResult] = await Promise.allSettled([
+    requestJson('/v1/healthz'),
+    requestJson('/v1/metadata'),
+  ]);
+  if (healthResult.status === 'fulfilled' && healthResult.value.status === 'ok') {
+    setApiStatus('online', 'API connected');
+  } else {
+    setApiStatus('offline', 'API unavailable');
+    $('#global-error-text').textContent = healthResult.status === 'rejected' ? healthResult.reason.message : 'The bot health check did not pass.';
+    $('#global-error').hidden = false;
+  }
+  if (metadataResult.status === 'fulfilled') {
+    const model = metadataResult.value.model || metadataResult.value.team_name;
+    $('#sidebar-model').textContent = model || 'Merchant assistant';
+    $('#footer-model').textContent = model || 'VERA MERCHANT AI';
+  }
+  await loadWorkspace();
+}
+
+$('#merchant-select').addEventListener('change', (event) => loadWorkspace(event.target.value));
+$('#retry-button').addEventListener('click', () => loadWorkspace(selectedMerchantId));
+$('#chat-form').addEventListener('submit', sendChat);
+$('#chat-input').addEventListener('input', (event) => {
+  event.target.style.height = 'auto';
+  event.target.style.height = `${Math.min(event.target.scrollHeight, 112)}px`;
+});
+$('#clear-chat').addEventListener('click', () => {
+  if (!selectedMerchantId) return;
+  chatMessages = [];
+  saveChat();
+  renderChat();
+  $('#chat-error').hidden = true;
+  toast('This browser chat was cleared. Recorded merchant history is unchanged.');
+});
+$('#draft-close').addEventListener('click', () => $('#draft-dialog').close());
+$('#draft-copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('#draft-message').textContent);
+    toast('Message copied to clipboard.', 'success');
+  } catch {
+    toast('Clipboard access is unavailable in this browser.', 'error');
   }
 });
 
-document.querySelector('#today-label').textContent = new Intl.DateTimeFormat('en', { weekday: 'short', month: 'short', day: 'numeric' }).format(new Date()).toUpperCase();
-loadScenarios();
+initialize();

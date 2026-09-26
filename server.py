@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from bot import compose
 from reply_logic import handle_reply
+from workspace_data import compose_for_merchant, record, workspace
 
 ROOT = Path(__file__).parent
 FRONTEND = ROOT / "frontend"
@@ -68,6 +69,19 @@ async def metadata():
     return {"team_name": "Dhruv Garg", "model": "Vera Merchant AI"}
 
 
+@app.get("/v1/config")
+async def runtime_config():
+    return {"api_base_url": os.environ.get("VERA_API_BASE_URL", "")}
+
+
+@app.get("/v1/workspace")
+async def get_workspace(merchant_id: str | None = None):
+    result = workspace(merchant_id)
+    if result is None:
+        return JSONResponse({"error": "Merchant not found"}, status_code=404)
+    return result
+
+
 @app.get("/v1/demo/scenarios")
 async def scenarios():
     result = []
@@ -115,6 +129,23 @@ async def demo_compose(request: Request):
     }
 
 
+@app.post("/v1/compose")
+async def compose_message(request: Request):
+    try:
+        data = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    result = compose_for_merchant(
+        data.get("merchant_id"),
+        data.get("trigger_id"),
+        data.get("customer_id"),
+    )
+    if result is None:
+        return JSONResponse({"error": "Merchant, trigger, or customer not found"}, status_code=404)
+    return result
+
+
 @app.post("/v1/context")
 async def context(request: Request):
     try:
@@ -141,7 +172,8 @@ async def reply(request: Request):
     except (json.JSONDecodeError, ValueError):
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
-    return handle_reply(data)
+    merchant = record("merchants", "merchant_id", data.get("merchant_id"))
+    return handle_reply(data, merchant)
 
 
 if __name__ == "__main__":

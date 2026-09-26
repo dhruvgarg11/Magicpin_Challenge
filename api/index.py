@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlparse
 
 from bot import compose
 from reply_logic import handle_reply
+from workspace_data import compose_for_merchant, record, workspace
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "dataset" / "expanded"
@@ -63,6 +64,17 @@ class handler(BaseHTTPRequestHandler):
             self.send_json({"status": "ok"})
         elif path == "/v1/metadata":
             self.send_json({"team_name": "Dhruv Garg", "model": "Vera Merchant AI"})
+        elif path == "/v1/config":
+            import os
+
+            self.send_json({"api_base_url": os.environ.get("VERA_API_BASE_URL", "")})
+        elif path == "/v1/workspace":
+            merchant_id = parse_qs(urlparse(self.path).query).get("merchant_id", [None])[0]
+            result = workspace(merchant_id)
+            if result is None:
+                self.send_json({"error": "Merchant not found"}, 404)
+            else:
+                self.send_json(result)
         elif path == "/v1/demo/scenarios":
             scenarios = []
             for pair in demo_pairs():
@@ -92,7 +104,17 @@ class handler(BaseHTTPRequestHandler):
             return
 
         path = self.route()
-        if path == "/v1/demo/compose":
+        if path == "/v1/compose":
+            result = compose_for_merchant(
+                data.get("merchant_id"),
+                data.get("trigger_id"),
+                data.get("customer_id"),
+            )
+            if result is None:
+                self.send_json({"error": "Merchant, trigger, or customer not found"}, 404)
+            else:
+                self.send_json(result)
+        elif path == "/v1/demo/compose":
             pair = next(
                 (item for item in demo_pairs() if item["test_id"] == data.get("test_id")),
                 None,
@@ -116,6 +138,7 @@ class handler(BaseHTTPRequestHandler):
         elif path == "/v1/tick":
             self.send_json({"actions": []})
         elif path == "/v1/reply":
-            self.send_json(handle_reply(data))
+            merchant = record("merchants", "merchant_id", data.get("merchant_id"))
+            self.send_json(handle_reply(data, merchant))
         else:
             self.send_json({"error": "Not found"}, 404)
