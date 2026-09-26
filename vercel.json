@@ -1,0 +1,26 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/index.py": {
+      "includeFiles": "dataset/expanded/**"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/",
+      "destination": "/frontend/index.html"
+    },
+    {
+      "source": "/app.css",
+      "destination": "/frontend/app.css"
+    },
+    {
+      "source": "/app.js",
+      "destination": "/frontend/app.js"
+    },
+    {
+      "source": "/v1/:path*",
+      "destination": "/api?path=:path*"
+    }
+  ]
+}
