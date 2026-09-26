@@ -7,24 +7,44 @@ let workspaceData = null;
 let selectedMerchantId = null;
 let workspaceRequest;
 let toastTimer;
+let scenarioRecords = [];
+let activeScenarioId = null;
+let scenarioRequestVersion = 0;
 
 function apiUrl(path) {
   return `${apiBase}${path}`;
 }
 
 async function requestJson(path, options = {}) {
-  const response = await fetch(apiUrl(path), {
-    ...options,
-    headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers },
-  });
-  let data;
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs || 8000;
+  const externalSignal = options.signal;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const abortFromCaller = () => controller.abort(externalSignal.reason);
+  externalSignal?.addEventListener('abort', abortFromCaller, { once: true });
+
   try {
-    data = await response.json();
-  } catch {
-    throw new Error(`The service returned an unreadable response (${response.status}).`);
+    const response = await fetch(apiUrl(path), {
+      ...options,
+      signal: controller.signal,
+      headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers },
+    });
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error(`The service returned an unreadable response (${response.status}).`);
+    }
+    if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
+    return data;
+  } catch (error) {
+    if (externalSignal?.aborted) throw error;
+    if (controller.signal.aborted) throw new Error(`The API request timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+    throw new Error(`Could not reach the API: ${error.message}`);
+  } finally {
+    clearTimeout(timeout);
+    externalSignal?.removeEventListener('abort', abortFromCaller);
   }
-  if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
-  return data;
 }
 
 function setApiStatus(state, label) {
@@ -79,6 +99,118 @@ function payloadFacts(payload = {}) {
     .filter(([key, value]) => !['placeholder', 'merchant_last_message'].includes(key) && value !== null && value !== '' && typeof value !== 'object')
     .slice(0, 3)
     .map(([key, value]) => `${formatLabel(key)}: ${typeof value === 'boolean' ? (value ? 'Yes' : 'No') : value}`);
+}
+
+function scenarioLabel(scenario) {
+  return `${scenario.test_id} · ${scenario.merchant_name} · ${formatLabel(scenario.kind)}${scenario.city ? ` · ${scenario.city}` : ''}`;
+}
+
+function renderScenarioOptions() {
+  const query = $('#scenario-search').value.trim().toLowerCase();
+  const category = $('#scenario-category').value;
+  const matching = scenarioRecords.filter((scenario) => {
+    const searchable = `${scenario.test_id} ${scenario.merchant_name} ${scenario.kind} ${scenario.city} ${scenario.category}`.toLowerCase();
+    return (category === 'all' || scenario.category === category) && searchable.includes(query);
+  });
+  const select = $('#scenario-select');
+  select.replaceChildren();
+  if (!matching.length) {
+    select.append(new Option('No matching scenarios', ''));
+    select.disabled = true;
+    $('#scenario-feedback').hidden = false;
+    $('#scenario-feedback').textContent = 'No challenge scenarios match these filters.';
+    $('#scenario-result').hidden = true;
+    return;
+  }
+
+  for (const scenario of matching) {
+    const option = new Option(scenarioLabel(scenario), scenario.test_id);
+    option.selected = scenario.test_id === activeScenarioId;
+    select.append(option);
+  }
+  select.disabled = false;
+  $('#scenario-total').textContent = `${matching.length} / ${scenarioRecords.length}`;
+  if (!activeScenarioId || !matching.some((scenario) => scenario.test_id === activeScenarioId)) {
+    activeScenarioId = matching[0].test_id;
+    select.value = activeScenarioId;
+    loadScenarioPreview(activeScenarioId);
+  }
+}
+
+async function loadScenarioRecords() {
+  const feedback = $('#scenario-feedback');
+  feedback.hidden = false;
+  feedback.className = 'scenario-feedback';
+  feedback.replaceChildren(make('span', 'spinner'), document.createTextNode('Loading scenario records from the API'));
+  $('#scenario-select').disabled = true;
+  try {
+    const data = await requestJson('/v1/demo/scenarios');
+    scenarioRecords = Array.isArray(data.scenarios) ? data.scenarios : [];
+    const categories = [...new Set(scenarioRecords.map((scenario) => scenario.category).filter(Boolean))].sort();
+    const categorySelect = $('#scenario-category');
+    for (const category of categories) categorySelect.append(new Option(formatLabel(category), category));
+    if (!scenarioRecords.length) {
+      feedback.className = 'scenario-feedback empty';
+      feedback.textContent = 'No challenge scenarios are available from the API.';
+      $('#scenario-total').textContent = '0';
+      return;
+    }
+    feedback.hidden = true;
+    renderScenarioOptions();
+  } catch (error) {
+    feedback.className = 'scenario-feedback error';
+    feedback.textContent = `Scenario records could not be loaded: ${error.message}`;
+    $('#scenario-total').textContent = 'Unavailable';
+    $('#scenario-select').disabled = true;
+  }
+}
+
+async function loadScenarioPreview(testId) {
+  const version = ++scenarioRequestVersion;
+  activeScenarioId = testId;
+  const feedback = $('#scenario-feedback');
+  feedback.hidden = false;
+  feedback.className = 'scenario-feedback';
+  feedback.replaceChildren(make('span', 'spinner'), document.createTextNode('Loading selected merchant and trigger context'));
+  $('#scenario-result').hidden = true;
+  $('#copy-preview').disabled = true;
+  try {
+    const result = await requestJson('/v1/demo/compose', {
+      method: 'POST',
+      body: JSON.stringify({ test_id: testId }),
+    });
+    if (version !== scenarioRequestVersion) return;
+    const scenario = scenarioRecords.find((item) => item.test_id === testId);
+    if (!scenario) throw new Error('The selected scenario is no longer available.');
+    $('#preview-avatar').textContent = scenario.merchant_name.trim().charAt(0).toUpperCase();
+    $('#preview-merchant').textContent = scenario.merchant_name;
+    $('#preview-context-line').textContent = [scenario.category, scenario.city, scenario.customer_name && `Customer · ${scenario.customer_name}`].filter(Boolean).map(formatLabel).join(' · ');
+    $('#preview-message').textContent = result.message?.body || 'No message body was returned.';
+    $('#preview-action').textContent = [result.message?.cta && `CTA · ${formatLabel(result.message.cta)}`, result.message?.send_as && `Sent as · ${formatLabel(result.message.send_as)}`].filter(Boolean).join(' · ') || 'No action metadata returned';
+    $('#preview-rationale').textContent = result.message?.rationale || 'No rationale was returned for this scenario.';
+    const context = {
+      category: result.category,
+      merchant: result.merchant,
+      trigger: result.trigger,
+      customer: result.customer,
+    };
+    const contextSummary = [
+      result.category?.display_name || scenario.category,
+      result.merchant?.identity?.name || scenario.merchant_name,
+      formatLabel(result.trigger?.kind || scenario.kind),
+      result.customer?.identity?.name || scenario.customer_name,
+    ].filter(Boolean);
+    $('#preview-context-summary').textContent = contextSummary.join(' · ');
+    $('#preview-context-data').textContent = JSON.stringify(context, null, 2);
+    $('#scenario-result').hidden = false;
+    $('#copy-preview').disabled = !result.message?.body;
+    feedback.hidden = true;
+  } catch (error) {
+    if (version !== scenarioRequestVersion) return;
+    feedback.className = 'scenario-feedback error';
+    feedback.textContent = `Message preview could not be loaded: ${error.message}`;
+    $('#scenario-result').hidden = true;
+  }
 }
 
 function renderMerchantOptions(merchants, selectedId) {
@@ -437,11 +569,31 @@ async function initialize() {
     $('#sidebar-model').textContent = model || 'Merchant assistant';
     $('#footer-model').textContent = model || 'VERA MERCHANT AI';
   }
-  await loadWorkspace();
+  await Promise.all([loadWorkspace(), loadScenarioRecords()]);
 }
 
 $('#merchant-select').addEventListener('change', (event) => loadWorkspace(event.target.value));
 $('#retry-button').addEventListener('click', () => loadWorkspace(selectedMerchantId));
+$('#scenario-search').addEventListener('input', renderScenarioOptions);
+$('#scenario-category').addEventListener('change', renderScenarioOptions);
+$('#scenario-select').addEventListener('change', (event) => {
+  if (event.target.value) loadScenarioPreview(event.target.value);
+});
+$('#copy-preview').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('#preview-message').textContent);
+    toast('Scenario message copied.', 'success');
+  } catch {
+    toast('Clipboard access is unavailable in this browser.', 'error');
+  }
+});
+$('#scenario-context-toggle').addEventListener('click', (event) => {
+  const data = $('#preview-context-data');
+  data.hidden = !data.hidden;
+  const expanded = !data.hidden;
+  event.currentTarget.setAttribute('aria-expanded', String(expanded));
+  event.currentTarget.innerHTML = expanded ? 'Hide context <span>↙</span>' : 'View context <span>↗</span>';
+});
 $('#chat-form').addEventListener('submit', sendChat);
 $('#chat-input').addEventListener('input', (event) => {
   event.target.style.height = 'auto';

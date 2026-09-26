@@ -4,20 +4,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from bot import compose
+from challenge_runtime import context_payload, health_status, store_context, tick_actions
 from reply_logic import handle_reply
 from workspace_data import compose_for_merchant, record, workspace
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "dataset" / "expanded"
 PAIRS_FILE = DATA / "test_pairs.json"
-contexts = {
-    "category": {},
-    "merchant": {},
-    "trigger": {},
-    "customer": {},
-}
-
-
 def load_json(folder, name):
     with (DATA / folder / f"{name}.json").open(encoding="utf-8") as source:
         return json.load(source)
@@ -61,7 +54,7 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.route()
         if path == "/v1/healthz":
-            self.send_json({"status": "ok"})
+            self.send_json(health_status())
         elif path == "/v1/metadata":
             self.send_json({"team_name": "Dhruv Garg", "model": "Vera Merchant AI"})
         elif path == "/v1/config":
@@ -126,19 +119,19 @@ class handler(BaseHTTPRequestHandler):
             self.send_json({
                 "message": compose(category, merchant, trigger, customer),
                 "merchant": merchant,
+                "category": category,
                 "trigger": trigger,
                 "customer": customer,
             })
         elif path == "/v1/context":
-            scope = data.get("scope")
-            context_id = data.get("context_id")
-            if scope in contexts and context_id:
-                contexts[scope][context_id] = data.get("payload", {})
-            self.send_json({"accepted": True})
+            result, status = store_context(data)
+            self.send_json(result, status)
         elif path == "/v1/tick":
-            self.send_json({"actions": []})
+            self.send_json({"actions": tick_actions(data)})
         elif path == "/v1/reply":
-            merchant = record("merchants", "merchant_id", data.get("merchant_id"))
+            merchant = context_payload("merchant", data.get("merchant_id")) or record(
+                "merchants", "merchant_id", data.get("merchant_id")
+            )
             self.send_json(handle_reply(data, merchant))
         else:
             self.send_json({"error": "Not found"}, 404)

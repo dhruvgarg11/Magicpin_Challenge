@@ -21,6 +21,7 @@
       <span class="workspace-label">WORKSPACE</span>
       <nav class="main-nav" aria-label="Workspace navigation">
         <a class="nav-item active" href="#overview"><span class="nav-icon">◫</span> Overview</a>
+        <a class="nav-item" href="#scenario-studio"><span class="nav-icon">▤</span> Message preview</a>
         <a class="nav-item" href="#insights"><span class="nav-icon">✳</span> Insights <span class="nav-count" id="trigger-count">—</span></a>
         <a class="nav-item" href="#assistant"><span class="nav-icon">↳</span> Assistant</a>
         <a class="nav-item" href="#activity"><span class="nav-icon">◷</span> Activity</a>
@@ -57,6 +58,23 @@
         <article class="metric-card"><div class="metric-top"><span class="metric-label">CALLS</span><span class="metric-icon mint">⌕</span></div><strong class="metric-value" id="metric-calls">—</strong><div class="metric-foot" id="metric-calls-foot">Performance data unavailable</div></article>
         <article class="metric-card"><div class="metric-top"><span class="metric-label">DIRECTIONS</span><span class="metric-icon yellow">⌖</span></div><strong class="metric-value" id="metric-directions">—</strong><div class="metric-foot" id="metric-directions-foot">Performance data unavailable</div></article>
         <article class="metric-card"><div class="metric-top"><span class="metric-label">LEADS</span><span class="metric-icon blue">↗</span></div><strong class="metric-value" id="metric-leads">—</strong><div class="metric-foot" id="metric-leads-foot">Performance data unavailable</div></article>
+      </section>
+
+      <section class="surface scenario-workbench" id="scenario-studio" aria-labelledby="scenario-heading">
+        <div class="surface-heading scenario-workbench-heading"><div><span class="section-kicker">CHALLENGE SCENARIO RECORDS</span><h2 id="scenario-heading">Message preview</h2></div><span class="live-count" id="scenario-total">—</span></div>
+        <div class="scenario-controls">
+          <label class="scenario-search"><span>⌕</span><input id="scenario-search" type="search" placeholder="Search merchant, city, or trigger" aria-label="Search challenge scenarios"></label>
+          <label class="scenario-category"><span class="sr-only">Filter scenarios by category</span><select id="scenario-category"><option value="all">All categories</option></select></label>
+          <label class="scenario-select"><span class="sr-only">Choose a challenge scenario</span><select id="scenario-select" disabled><option>Loading scenario records…</option></select></label>
+        </div>
+        <div class="scenario-feedback" id="scenario-feedback" aria-live="polite"><span class="spinner"></span>Loading scenario records from the API</div>
+        <div class="scenario-result" id="scenario-result" hidden>
+          <div class="scenario-message-column"><div class="preview-recipient"><span class="preview-avatar" id="preview-avatar">V</span><div><strong id="preview-merchant">Selected merchant</strong><small id="preview-context-line">Merchant and trigger context</small></div><span class="preview-channel">MESSAGE DRAFT</span></div>
+            <div class="preview-message" id="preview-message"></div>
+            <div class="preview-message-footer"><span id="preview-action">Action not specified</span><button type="button" class="copy-preview" id="copy-preview" disabled>Copy message</button></div>
+          </div>
+          <div class="scenario-insights"><section class="scenario-insight"><span class="section-kicker">WHY THIS MESSAGE</span><p id="preview-rationale">No rationale returned.</p></section><section class="scenario-insight context-insight"><div class="context-insight-heading"><span class="section-kicker">CONTEXT USED</span><button id="scenario-context-toggle" class="text-button" type="button" aria-expanded="false">View context <span>↗</span></button></div><p id="preview-context-summary">Selected merchant, category, trigger, and optional customer.</p><pre id="preview-context-data" hidden></pre></section></div>
+        </div>
       </section>
 
       <section class="primary-grid">

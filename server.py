@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from bot import compose
+from challenge_runtime import context_payload, health_status, store_context, tick_actions
 from reply_logic import handle_reply
 from workspace_data import compose_for_merchant, record, workspace
 
@@ -15,14 +16,6 @@ DATA = ROOT / "dataset" / "expanded"
 PAIRS_FILE = DATA / "test_pairs.json"
 
 app = FastAPI(title="Vera Merchant AI")
-contexts = {
-    "category": {},
-    "merchant": {},
-    "trigger": {},
-    "customer": {},
-}
-
-
 def load_json(folder, name):
     with (DATA / folder / f"{name}.json").open(encoding="utf-8") as source:
         return json.load(source)
@@ -61,7 +54,7 @@ async def javascript():
 
 @app.get("/v1/healthz")
 async def healthz():
-    return {"status": "ok"}
+    return health_status()
 
 
 @app.get("/v1/metadata")
@@ -124,6 +117,7 @@ async def demo_compose(request: Request):
     return {
         "message": compose(category, merchant, trigger, customer),
         "merchant": merchant,
+        "category": category,
         "trigger": trigger,
         "customer": customer,
     }
@@ -151,18 +145,19 @@ async def context(request: Request):
     try:
         data = await request.json()
     except (json.JSONDecodeError, ValueError):
-        data = {}
+        return JSONResponse({"accepted": False, "reason": "invalid_json"}, status_code=400)
 
-    scope = data.get("scope")
-    context_id = data.get("context_id")
-    if scope in contexts and context_id:
-        contexts[scope][context_id] = data.get("payload", {})
-    return {"accepted": True}
+    result, status = store_context(data)
+    return JSONResponse(result, status_code=status)
 
 
 @app.post("/v1/tick")
-async def tick():
-    return {"actions": []}
+async def tick(request: Request):
+    try:
+        data = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        data = {}
+    return {"actions": tick_actions(data)}
 
 
 @app.post("/v1/reply")
@@ -172,7 +167,9 @@ async def reply(request: Request):
     except (json.JSONDecodeError, ValueError):
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
-    merchant = record("merchants", "merchant_id", data.get("merchant_id"))
+    merchant = context_payload("merchant", data.get("merchant_id")) or record(
+        "merchants", "merchant_id", data.get("merchant_id")
+    )
     return handle_reply(data, merchant)
 
 
