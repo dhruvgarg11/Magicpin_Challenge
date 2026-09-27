@@ -2,7 +2,7 @@ const $ = (selector) => document.querySelector(selector);
 const numberFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 
-let apiBase = window.location.origin;
+const apiBase = '';
 let workspaceData = null;
 let selectedMerchantId = null;
 let workspaceRequest;
@@ -148,6 +148,7 @@ async function loadScenarioRecords() {
     scenarioRecords = Array.isArray(data.scenarios) ? data.scenarios : [];
     const categories = [...new Set(scenarioRecords.map((scenario) => scenario.category).filter(Boolean))].sort();
     const categorySelect = $('#scenario-category');
+    categorySelect.replaceChildren(new Option('All categories', 'all'));
     for (const category of categories) categorySelect.append(new Option(formatLabel(category), category));
     if (!scenarioRecords.length) {
       feedback.className = 'scenario-feedback empty';
@@ -159,7 +160,11 @@ async function loadScenarioRecords() {
     renderScenarioOptions();
   } catch (error) {
     feedback.className = 'scenario-feedback error';
-    feedback.textContent = `Scenario records could not be loaded: ${error.message}`;
+    const message = make('span', '', `Scenario records could not be loaded: ${error.message}`);
+    const retry = make('button', 'scenario-retry', 'Retry');
+    retry.type = 'button';
+    retry.addEventListener('click', loadScenarioRecords);
+    feedback.replaceChildren(message, retry);
     $('#scenario-total').textContent = 'Unavailable';
     $('#scenario-select').disabled = true;
   }
@@ -504,14 +509,16 @@ async function loadWorkspace(merchantId) {
     $('#chat-input').disabled = chatEnded;
     $('#chat-send').disabled = chatEnded;
     if (chatEnded) $('#assistant-presence').innerHTML = '<i></i> Conversation ended';
-    $('#global-error').hidden = true;
+    return true;
   } catch (error) {
     if (error.name === 'AbortError') return;
+    $('#global-error').querySelector('strong').textContent = 'Workspace unavailable';
     $('#global-error-text').textContent = error.message;
     $('#global-error').hidden = false;
     $('#trigger-list').replaceChildren(make('div', 'empty-state error-state', `Could not load merchant insights: ${error.message}`));
     $('#merchant-select').disabled = false;
     toast(error.message, 'error');
+    return false;
   }
 }
 
@@ -586,29 +593,24 @@ async function sendChat(event, retryMessage = null) {
 
 async function initialize() {
   $('#today-label').textContent = new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric' }).format(new Date()).toUpperCase();
-  try {
-    const config = await requestJson('/v1/config');
-    if (config.api_base_url) apiBase = config.api_base_url.replace(/\/$/, '');
-  } catch (error) {
-    setApiStatus('offline', 'API configuration unavailable');
-    $('#global-error-text').textContent = `Could not read API configuration: ${error.message}`;
-    $('#global-error').hidden = false;
-    return;
-  }
-
+  setApiStatus('checking', 'Checking Vera AI…');
+  $('#global-error').hidden = true;
   const [healthResult, metadataResult] = await Promise.allSettled([
     requestJson('/v1/healthz'),
     requestJson('/v1/metadata'),
   ]);
   if (healthResult.status === 'fulfilled' && healthResult.value.status === 'ok') {
     const storageMode = healthResult.value.context_store;
-    setApiStatus(
-      'online',
-      storageMode === 'shared' ? 'API connected' : 'API online · memory only',
-    );
+    setApiStatus('online', 'Vera AI · Connected');
+    $('#sidebar-model').textContent = storageMode === 'instance-memory'
+      ? 'Context storage · instance memory'
+      : 'Context storage · shared';
   } else {
-    setApiStatus('offline', 'API unavailable');
-    $('#global-error-text').textContent = healthResult.status === 'rejected' ? healthResult.reason.message : 'The bot health check did not pass.';
+    setApiStatus('offline', 'Backend unavailable');
+    $('#global-error').querySelector('strong').textContent = 'Backend unavailable';
+    $('#global-error-text').textContent = healthResult.status === 'rejected'
+      ? healthResult.reason.message
+      : 'The /v1/healthz health check did not pass.';
     $('#global-error').hidden = false;
   }
   if (metadataResult.status === 'fulfilled') {
@@ -616,11 +618,14 @@ async function initialize() {
     $('#sidebar-model').textContent = model || 'Merchant assistant';
     $('#footer-model').textContent = model || 'VERA MERCHANT AI';
   }
-  await Promise.all([loadWorkspace(), loadScenarioRecords()]);
+  const [workspaceLoaded] = await Promise.all([loadWorkspace(), loadScenarioRecords()]);
+  if (healthResult.status === 'fulfilled' && healthResult.value.status === 'ok' && workspaceLoaded) {
+    $('#global-error').hidden = true;
+  }
 }
 
 $('#merchant-select').addEventListener('change', (event) => loadWorkspace(event.target.value));
-$('#retry-button').addEventListener('click', () => loadWorkspace(selectedMerchantId));
+$('#retry-button').addEventListener('click', initialize);
 $('#scenario-search').addEventListener('input', renderScenarioOptions);
 $('#scenario-category').addEventListener('change', renderScenarioOptions);
 $('#scenario-select').addEventListener('change', (event) => {
