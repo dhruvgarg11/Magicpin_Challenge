@@ -671,6 +671,39 @@ def compose(category, merchant, trigger, customer=None):
             "days_since_expiry",
             0
         )
+        perf_dip_pct = payload.get(
+            "perf_dip_pct",
+            0
+        )
+
+        percent = round(abs(perf_dip_pct) * 100)
+
+        body = (
+            f"Hi {owner_name} — it’s been {days_since_expiry} days since "
+            f"your last active period. "
+        )
+
+        if perf_dip_pct:
+            body += (
+                f"Your recent performance is down {percent}%. "
+            )
+
+        body += "Want me to suggest a quick win-back offer?"
+
+        return {
+            "body": body,
+            "cta": "suggest_winback_offer",
+            "send_as": "vera",
+            "suppression_key": trigger.get(
+                "suppression_key",
+                ""
+            ),
+            "rationale": (
+                f"Win-back eligibility detected after {days_since_expiry} "
+                f"days since expiry."
+            )
+        }
+
     if kind == "perf_dip":
         payload = trigger.get("payload", {})
 
