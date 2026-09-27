@@ -12,6 +12,11 @@ from bot import compose
 SCOPES = ("category", "merchant", "customer", "trigger")
 contexts = {scope: {} for scope in SCOPES}
 _sent_suppression_keys = set()
+_conversation_states = {}
+_conversation_state_expiries = {}
+_CONVERSATION_STATE_TTL_SECONDS = 604800
+_MAX_LOCAL_CONVERSATIONS = 2048
+MAX_STORED_CONVERSATION_TEXT_CHARS = 2000
 _started_at = time.monotonic()
 
 
@@ -174,6 +179,117 @@ def context_payload(scope, context_id):
     return _find_context(scope, context_id)
 
 
+def _prune_local_conversations(now=None):
+    now = time.monotonic() if now is None else now
+    expired = [
+        conversation_id
+        for conversation_id, expires_at in _conversation_state_expiries.items()
+        if expires_at <= now
+    ]
+    expired.extend(
+        conversation_id
+        for conversation_id in _conversation_states
+        if conversation_id not in _conversation_state_expiries
+    )
+    for conversation_id in expired:
+        _conversation_states.pop(conversation_id, None)
+        _conversation_state_expiries.pop(conversation_id, None)
+
+    while len(_conversation_states) > _MAX_LOCAL_CONVERSATIONS:
+        oldest = min(
+            _conversation_states,
+            key=lambda conversation_id: _conversation_state_expiries.get(conversation_id, 0),
+        )
+        _conversation_states.pop(oldest, None)
+        _conversation_state_expiries.pop(oldest, None)
+
+
+def conversation_state(conversation_id):
+    if not isinstance(conversation_id, str) or not conversation_id.strip():
+        return {}
+    key = f"vera:conversation:{quote(conversation_id, safe='')}"
+    if _shared_store_enabled():
+        stored = _kv_command("GET", key)
+        state = json.loads(stored) if isinstance(stored, str) else stored
+        return state if isinstance(state, dict) else {}
+    _prune_local_conversations()
+    return dict(_conversation_states.get(conversation_id, {}))
+
+
+def save_conversation_state(conversation_id, state):
+    if not isinstance(conversation_id, str) or not conversation_id.strip():
+        return
+    key = f"vera:conversation:{quote(conversation_id, safe='')}"
+    state = dict(state)
+    messages = state.get("messages")
+    if isinstance(messages, list):
+        state["messages"] = [
+            {**message, "body": message["body"][:MAX_STORED_CONVERSATION_TEXT_CHARS]}
+            if isinstance(message, dict) and isinstance(message.get("body"), str)
+            else message
+            for message in messages
+        ]
+    for field in ("last_user_message", "last_assistant_body"):
+        value = state.get(field)
+        if isinstance(value, str):
+            state[field] = value[:MAX_STORED_CONVERSATION_TEXT_CHARS]
+    last_response = state.get("last_response")
+    if isinstance(last_response, dict) and isinstance(last_response.get("body"), str):
+        state["last_response"] = {
+            **last_response,
+            "body": last_response["body"][:MAX_STORED_CONVERSATION_TEXT_CHARS],
+        }
+    if _shared_store_enabled():
+        _kv_command(
+            "SET",
+            key,
+            json.dumps(state, ensure_ascii=False),
+            "EX",
+            str(_CONVERSATION_STATE_TTL_SECONDS),
+        )
+    else:
+        now = time.monotonic()
+        _prune_local_conversations(now)
+        if conversation_id not in _conversation_states:
+            while len(_conversation_states) >= _MAX_LOCAL_CONVERSATIONS:
+                oldest = min(
+                    _conversation_states,
+                    key=lambda item: _conversation_state_expiries.get(item, 0),
+                )
+                _conversation_states.pop(oldest, None)
+                _conversation_state_expiries.pop(oldest, None)
+        _conversation_states[conversation_id] = dict(state)
+        _conversation_state_expiries[conversation_id] = now + _CONVERSATION_STATE_TTL_SECONDS
+
+
+def remember_conversation_action(action):
+    conversation_id = action.get("conversation_id")
+    state = conversation_state(conversation_id)
+    messages = state.get("messages", [])
+    messages.append({
+        "role": "assistant",
+        "body": action.get("body", ""),
+        "action": "send",
+        "cta": action.get("cta", "open_ended"),
+    })
+    state.update({
+        "messages": messages[-8:],
+        "merchant_id": action.get("merchant_id"),
+        "customer_id": action.get("customer_id"),
+        "trigger_id": action.get("trigger_id"),
+        "last_assistant_body": action.get("body", ""),
+        "last_assistant_action": action.get("cta", "open_ended"),
+        "last_response": {
+            "action": "send",
+            "body": action.get("body", ""),
+            "cta": action.get("cta", "open_ended"),
+            "rationale": action.get("rationale", ""),
+        },
+        "ended": False,
+    })
+    save_conversation_state(conversation_id, state)
+
+
 def _timestamp(value):
     if not value:
         return None
@@ -240,7 +356,7 @@ def tick_actions(data):
             continue
         if not _claim_suppression(suppression_key, data.get("evaluation_id")):
             continue
-        actions.append({
+        action = {
             "conversation_id": f"conv_{uuid.uuid4().hex[:16]}",
             "merchant_id": merchant_id,
             "customer_id": customer_id,
@@ -252,5 +368,7 @@ def tick_actions(data):
             "cta": message.get("cta", "open_ended"),
             "suppression_key": suppression_key,
             "rationale": message.get("rationale", ""),
-        })
+        }
+        remember_conversation_action(action)
+        actions.append(action)
     return actions
