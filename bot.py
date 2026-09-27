@@ -673,7 +673,14 @@ def compose(category, merchant, trigger, customer=None):
         wedding_date = wedding_date.strip() if isinstance(wedding_date, str) else ""
         trial_completed = trial_completed.strip() if isinstance(trial_completed, str) else ""
         next_step = payload.get("next_step_window_open", "")
-        next_step_text = next_step.replace("_", " ").strip() if isinstance(next_step, str) else ""
+        is_skin_prep_program = next_step == "skin_prep_program_30day"
+        next_step_text = (
+            "30-day skin-prep program"
+            if is_skin_prep_program
+            else next_step.replace("_", " ").strip()
+            if isinstance(next_step, str)
+            else ""
+        )
 
         if wedding_date:
             body = f"Hi {owner_name} — your client's wedding is on {wedding_date}"
@@ -693,10 +700,13 @@ def compose(category, merchant, trigger, customer=None):
         if trial_completed:
             body += f" The trial was completed on {trial_completed}."
         if next_step_text:
-            body += f" The next step is {next_step_text}."
+            article = "the " if is_skin_prep_program else ""
+            body += f" The next step is {article}{next_step_text}."
 
         followup = (
-            f"the {next_step_text} follow-up"
+            "the follow-up"
+            if is_skin_prep_program
+            else f"the {next_step_text} follow-up"
             if next_step_text
             else "a wedding-package follow-up"
         )
@@ -1381,7 +1391,7 @@ def compose(category, merchant, trigger, customer=None):
                 f"Hi {owner_name} — it’s been "
                 f"{days_since_last_message} days since we last "
                 f"spoke. We were discussing {topic_text}. "
-                f"Want to pick that back up?"
+                f"Want me to review the subscription options with you?"
             ),
             "cta": "resume_conversation",
             "send_as": "vera",
