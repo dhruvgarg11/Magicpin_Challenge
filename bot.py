@@ -1,8 +1,11 @@
 def compose(category, merchant, trigger, customer=None):
 
     kind = trigger.get("kind", "")
-    owner_name = merchant.get("identity", {}).get(
-        "owner_first_name", "there"
+    merchant_identity = merchant.get("identity") or {}
+    owner_name = (
+        merchant_identity.get("owner_first_name")
+        or merchant_identity.get("name")
+        or "there"
     )
 
     # IPL MATCH TODAY
@@ -118,6 +121,13 @@ def compose(category, merchant, trigger, customer=None):
                 f"Want me to draft a sample package?"
             )
             cta = "draft_package"
+        elif intent_topic == "kids_yoga_summer_camp":
+            body = (
+                f"Hi {owner_name} — for a kids' yoga program, an age group, "
+                f"session length, and parent-friendly schedule can make the "
+                f"outline easier to plan. Want me to draft a sample outline?"
+            )
+            cta = "draft_program"
         else:
             body = (
                 f"Hi {owner_name} — I can help turn that idea into "
@@ -374,6 +384,7 @@ def compose(category, merchant, trigger, customer=None):
 
     # APPOINTMENT TOMORROW
     if kind == "appointment_tomorrow":
+        payload = trigger.get("payload") or {}
         customer_name = "there"
 
         if customer:
@@ -385,21 +396,77 @@ def compose(category, merchant, trigger, customer=None):
                 "there"
             )
 
+        appointment = payload.get("appointment")
+        if not isinstance(appointment, dict):
+            appointment = {}
+
+        service = appointment.get("service") or payload.get("service") or ""
+        appointment_date = (
+            appointment.get("date")
+            or payload.get("appointment_date")
+            or payload.get("date")
+            or ""
+        )
+        appointment_time = (
+            appointment.get("time")
+            or payload.get("appointment_time")
+            or payload.get("time")
+            or ""
+        )
+        service = service.strip() if isinstance(service, str) else ""
+        appointment_date = (
+            appointment_date.strip()
+            if isinstance(appointment_date, str)
+            else ""
+        )
+        appointment_time = (
+            appointment_time.strip()
+            if isinstance(appointment_time, str)
+            else ""
+        )
+
+        has_appointment_details = (
+            not payload.get("placeholder")
+            and bool(service or appointment_date or appointment_time)
+        )
+
+        if has_appointment_details:
+            visit_label = f"your {service} appointment" if service else "your appointment"
+            when = appointment_date or "tomorrow"
+            if appointment_time:
+                when += f" at {appointment_time}"
+            body = (
+                f"Hi {customer_name} — {visit_label} is listed for {when}. "
+                f"Would you like me to help confirm it?"
+            )
+            cta = "confirm_appointment"
+            rationale = "Appointment reminder uses the date, time, or service supplied in the trigger payload."
+        else:
+            category_slug = category.get("slug", "")
+            visit_type = {
+                "salons": "salon visit",
+                "dentists": "dental visit",
+                "gyms": "fitness session",
+            }.get(category_slug, "visit")
+            body = (
+                f"Hi {customer_name} — would you like help planning a "
+                f"{visit_type} for tomorrow?"
+            )
+            cta = "plan_visit"
+            rationale = (
+                "Appointment trigger has no confirmed date, time, or service; "
+                "using a neutral planning prompt."
+            )
+
         return {
-            "body": (
-                f"Hi {customer_name} — quick reminder: "
-                f"you have an appointment tomorrow. "
-                f"Would you like me to help you confirm the appointment?"
-            ),
-            "cta": "confirm_appointment",
+            "body": body,
+            "cta": cta,
             "send_as": "merchant_on_behalf",
             "suppression_key": trigger.get(
                 "suppression_key",
                 ""
             ),
-            "rationale": (
-                "Appointment scheduled for tomorrow."
-            )
+            "rationale": rationale
         }
 
     # RECALL DUE
@@ -587,36 +654,56 @@ def compose(category, merchant, trigger, customer=None):
     if kind == "wedding_package_followup":
         payload = trigger.get("payload", {})
 
-        wedding_date = payload.get(
-            "wedding_date",
-            ""
-        )
-        trial_completed = payload.get(
-            "trial_completed",
-            ""
-        )
-        days_until = payload.get(
-            "days_until_wedding",
-            0
-        )
-        next_step = payload.get(
-            "next_step_window_open",
-            ""
-        )
+        wedding_date = payload.get("wedding_date", "")
+        trial_completed = payload.get("trial_completed", "")
+        days_until = payload.get("days_to_wedding")
+        if not (
+            isinstance(days_until, (int, float))
+            and not isinstance(days_until, bool)
+            and days_until >= 0
+        ):
+            days_until = payload.get("days_until_wedding")
+        if not (
+            isinstance(days_until, (int, float))
+            and not isinstance(days_until, bool)
+            and days_until >= 0
+        ):
+            days_until = None
 
-        next_step_text = next_step.replace(
-            "_",
-            " "
+        wedding_date = wedding_date.strip() if isinstance(wedding_date, str) else ""
+        trial_completed = trial_completed.strip() if isinstance(trial_completed, str) else ""
+        next_step = payload.get("next_step_window_open", "")
+        next_step_text = next_step.replace("_", " ").strip() if isinstance(next_step, str) else ""
+
+        if wedding_date:
+            body = f"Hi {owner_name} — your client's wedding is on {wedding_date}"
+            if days_until is not None:
+                body += f", {days_until} days away"
+            body += "."
+        elif days_until is not None:
+            body = (
+                f"Hi {owner_name} — your client's wedding is "
+                f"{days_until} days away."
+            )
+        else:
+            body = (
+                f"Hi {owner_name} — I'm checking in on the wedding package."
+            )
+
+        if trial_completed:
+            body += f" The trial was completed on {trial_completed}."
+        if next_step_text:
+            body += f" The next step is {next_step_text}."
+
+        followup = (
+            f"the {next_step_text} follow-up"
+            if next_step_text
+            else "a wedding-package follow-up"
         )
+        body += f" Want me to draft {followup}?"
 
         return {
-            "body": (
-                f"Hi {owner_name} — your client's wedding is on "
-                f"{wedding_date}, {days_until} days away. "
-                f"Since the trial was completed on {trial_completed}, "
-                f"this is a good window to plan the "
-                f"{next_step_text}. Want me to draft the follow-up?"
-            ),
+            "body": body,
             "cta": "draft_followup",
             "send_as": "vera",
             "suppression_key": trigger.get(
@@ -624,8 +711,10 @@ def compose(category, merchant, trigger, customer=None):
                 ""
             ),
             "rationale": (
-                f"Wedding follow-up triggered with next step: "
-                f"{next_step_text}."
+                "Wedding package follow-up triggered with "
+                f"wedding date {wedding_date or 'unavailable'}, "
+                f"countdown {days_until if days_until is not None else 'unavailable'}, "
+                f"and next step {next_step_text or 'unavailable'}."
             )
         }
 
@@ -704,6 +793,79 @@ def compose(category, merchant, trigger, customer=None):
             )
         }
 
+    # RENEWAL DUE
+    if kind == "renewal_due":
+        payload = trigger.get("payload") or {}
+        subscription = merchant.get("subscription") or {}
+
+        plan = payload.get("plan") or subscription.get("plan")
+        plan = plan.strip() if isinstance(plan, str) else ""
+        days_remaining = payload.get("days_remaining")
+        if not (
+            isinstance(days_remaining, (int, float))
+            and not isinstance(days_remaining, bool)
+            and days_remaining >= 0
+        ):
+            days_remaining = subscription.get("days_remaining")
+        if not (
+            isinstance(days_remaining, (int, float))
+            and not isinstance(days_remaining, bool)
+            and days_remaining >= 0
+        ):
+            days_remaining = None
+
+        renewal_amount = payload.get("renewal_amount")
+        if not (
+            isinstance(renewal_amount, (int, float))
+            and not isinstance(renewal_amount, bool)
+            and renewal_amount >= 0
+        ):
+            renewal_amount = None
+
+        if plan or days_remaining is not None or renewal_amount is not None:
+            if plan:
+                body = f"Hi {owner_name} — your {plan} plan"
+            else:
+                body = f"Hi {owner_name} — your subscription"
+
+            if days_remaining == 0:
+                body += " is due for renewal now"
+            elif days_remaining is not None:
+                body += f" is due for renewal in {days_remaining} days"
+            else:
+                body += " is due for renewal"
+
+            if renewal_amount is not None:
+                amount_text = (
+                    f"{renewal_amount:,.0f}"
+                    if float(renewal_amount).is_integer()
+                    else f"{renewal_amount:,.2f}"
+                )
+                body += f". The listed renewal amount is {amount_text}"
+
+            body += ". Want me to review the renewal options with you?"
+            rationale = (
+                f"Renewal trigger includes plan {plan or 'unavailable'}, "
+                f"days remaining {days_remaining if days_remaining is not None else 'unavailable'}, "
+                f"and amount {renewal_amount if renewal_amount is not None else 'unavailable'}."
+            )
+        else:
+            body = (
+                f"Hi {owner_name} — I can help review your subscription "
+                "renewal options. Want me to outline them?"
+            )
+            rationale = (
+                "Renewal trigger received without plan, timing, or amount details."
+            )
+
+        return {
+            "body": body,
+            "cta": "review_renewal_options",
+            "send_as": "vera",
+            "suppression_key": trigger.get("suppression_key", ""),
+            "rationale": rationale,
+        }
+
     if kind == "perf_dip":
         payload = trigger.get("payload", {})
 
@@ -739,6 +901,7 @@ def compose(category, merchant, trigger, customer=None):
             "window",
             ""
         )
+        vs_baseline = payload.get("vs_baseline")
 
         percent = round(
             abs(perf_dip) * 100
@@ -747,9 +910,11 @@ def compose(category, merchant, trigger, customer=None):
         body = (
             f"Quick heads-up, {owner_name} — "
             f"your {metric} are down {percent}% "
-            f"over the last {window}. "
-            f"Want me to suggest a simple way to bring them back up?"
+            f"over the last {window}"
         )
+        if vs_baseline is not None:
+            body += f" (vs. a baseline of {vs_baseline})"
+        body += ". Want me to suggest a simple way to bring them back up?"
 
         return {
             "body": body,
@@ -761,7 +926,8 @@ def compose(category, merchant, trigger, customer=None):
             ),
             "rationale": (
                 f"Performance dip detected: "
-                f"{percent}% over {window}."
+                f"{percent}% over {window}"
+                f"{f' vs. baseline {vs_baseline}' if vs_baseline is not None else ''}."
             )
         }
 
@@ -1231,14 +1397,23 @@ def compose(category, merchant, trigger, customer=None):
 
     # FESTIVAL UPCOMING
     if kind == "festival_upcoming":
-        payload = trigger.get("payload", {})
+        payload = trigger.get("payload") or {}
+
+        category_slug = category.get("slug", "")
+        category_focus = {
+            "salons": "salon appointments",
+            "restaurants": "restaurant orders",
+            "gyms": "member activities",
+            "dentists": "clinic communication",
+            "pharmacies": "customer communication",
+        }.get(category_slug, "your business")
 
         if payload.get("placeholder"):
             return {
                 "body": (
                     f"Quick heads-up, {owner_name} — "
-                    f"a festival-related campaign opportunity is coming up. "
-                    f"Want me to draft a festive offer?"
+                    f"a festival-planning opportunity came up for "
+                    f"{category_focus}. Want me to draft a suitable message?"
                 ),
                 "cta": "draft_festival_offer",
                 "send_as": "vera",
@@ -1247,25 +1422,35 @@ def compose(category, merchant, trigger, customer=None):
                     ""
                 ),
                 "rationale": (
-                    "Festival opportunity detected, but exact festival "
-                    "details are unavailable."
+                    "Festival-planning trigger has no festival name or date; "
+                    "using category-appropriate wording without adding details."
                 )
             }
 
-        festival = payload.get(
-            "festival",
-            "an upcoming festival"
-        )
-        festival_date = payload.get(
-            "festival_date",
-            ""
-        )
+        festival = payload.get("festival", "")
+        festival = festival.strip() if isinstance(festival, str) else ""
+        festival_date = payload.get("festival_date") or payload.get("date") or ""
+        festival_date = festival_date.strip() if isinstance(festival_date, str) else ""
+        days_until = payload.get("days_until")
+        if not (
+            isinstance(days_until, (int, float))
+            and not isinstance(days_until, bool)
+            and days_until >= 0
+        ):
+            days_until = None
+
+        event_name = festival or "the festival opportunity"
+        if festival_date:
+            timing = f"is listed for {festival_date}"
+        elif days_until is not None:
+            timing = f"is listed as {days_until} days away"
+        else:
+            timing = "is flagged for planning"
 
         body = (
-            f"Quick heads-up, {owner_name} — "
-            f"{festival} is coming up. "
-            "A festive campaign could be worth planning early. "
-            "Want me to draft a festive offer?"
+            f"Quick heads-up, {owner_name} — {event_name} {timing}. "
+            f"The trigger flags a planning opportunity for {category_focus}. "
+            f"Want me to draft a suitable message?"
         )
 
         return {
@@ -1277,7 +1462,9 @@ def compose(category, merchant, trigger, customer=None):
                 ""
             ),
             "rationale": (
-                f"Festival opportunity detected: {festival}."
+                f"Festival opportunity detected: {event_name}; "
+                f"date {festival_date or 'unavailable'}; "
+                f"category {category_slug or 'unavailable'}."
             )
         }
 
